@@ -11,3 +11,4 @@ pub mod lyrics;
 pub mod session;
 pub mod spotify_embed;
 pub mod theme;
+pub mod tools;

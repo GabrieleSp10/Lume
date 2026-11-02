@@ -16,7 +16,8 @@ use std::{
 
 use app_core::{
     cache::Store,
-    config::{youtube_cookies_file, AppConfig},
+    config::{tools_dir, youtube_cookies_file, AppConfig},
+    tools,
 };
 use serde_json::{json, Value};
 
@@ -55,10 +56,17 @@ pub const YOUTUBE_URI: &str = "youtube:";
 const SEARCH_LIMIT: u32 = 20;
 
 impl Ytdlp {
+    /// A path set in the config wins; then the copy the app installed; then the PATH.
     pub fn from_config(config: &AppConfig) -> Self {
         let file = youtube_cookies_file();
+        let own = tools::ytdlp_exe();
+        let path = match (config.ytdlp_path.is_empty(), own.exists()) {
+            (false, _) => config.ytdlp_path.clone(),
+            (true, true) => own.to_string_lossy().into_owned(),
+            (true, false) => String::new(),
+        };
         Self {
-            path: config.ytdlp_path.clone(),
+            path,
             cookies_file: if file.exists() { file.to_string_lossy().into_owned() } else { String::new() },
         }
     }
@@ -87,6 +95,15 @@ impl Ytdlp {
         let program = if self.path.is_empty() { "yt-dlp" } else { self.path.as_str() };
         let mut process = Process::new(program);
         process.creation_flags(CREATE_NO_WINDOW);
+        // The app's Deno comes first, so yt-dlp finds a JavaScript runtime without any setup.
+        if tools::deno_exe().exists() {
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let mut dirs = vec![tools_dir()];
+            dirs.extend(std::env::split_paths(&path));
+            if let Ok(joined) = std::env::join_paths(dirs) {
+                process.env("PATH", joined);
+            }
+        }
         // Without certifi it trusts the Windows store, like the rest of the app does.
         process.args(["--no-config", "--no-warnings", "--socket-timeout", "10", "--compat-options", "no-certifi"]);
         if !self.cookies_file.is_empty() {

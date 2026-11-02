@@ -24,13 +24,9 @@ Serve **Spotify Premium** e una tua app Spotify gratuita (ogni persona usa la pr
 
 ## Ascoltare da YouTube
 
-Lume usa [yt-dlp](https://github.com/yt-dlp/yt-dlp), da installare a parte:
+Non serve installare niente a mano: quando scegli YouTube, Lume scarica da solo [yt-dlp](https://github.com/yt-dlp/yt-dlp) e [Deno](https://deno.com/) (circa 115 MB, dalle loro pagine ufficiali su GitHub, controllandone l'integrità) e tiene yt-dlp aggiornato.
 
-1. Installa [Python](https://www.python.org/downloads/) e [Deno](https://deno.com/).
-2. Da un terminale: `pip install -U "yt-dlp[default]"`
-3. In Lume premi **Collega account YouTube** e accedi con il tuo account Google: evita i blocchi «non sei un bot».
-
-YouTube cambia spesso: se i brani smettono di partire, aggiorna yt-dlp con lo stesso comando.
+Poi premi **Collega account YouTube** e accedi con il tuo account Google: evita i blocchi «non sei un bot».
 
 L'accesso a YouTube resta salvato solo sul tuo computer; «Scollega» lo cancella. Usare yt-dlp va contro le condizioni d'uso di YouTube: fallo a tuo rischio.
 

@@ -39,7 +39,6 @@ const LYRICS_PAGE: i32 = 6;
 
 /// Where users create their own Spotify app.
 const SPOTIFY_DASHBOARD: &str = "https://developer.spotify.com/dashboard";
-const YTDLP_PAGE: &str = "https://github.com/yt-dlp/yt-dlp/wiki/Installation";
 /// Engines in the order Settings shows them.
 const ENGINES: [EngineKind; 3] = [EngineKind::Spotify, EngineKind::YouTube, EngineKind::Librespot];
 const USAGE_TICK: Duration = Duration::from_secs(2);
@@ -131,8 +130,9 @@ fn wire_onboarding(ui: &MainWindow) {
         let engine = if choice == 0 { EngineKind::Spotify } else { EngineKind::YouTube };
         ui.set_engine_index(ENGINES.iter().position(|e| *e == engine).unwrap_or(0) as i32);
         change_engine(|c| c.engine = engine.name().to_string());
+        // Choosing YouTube installs what it needs, with nothing to do by hand.
         if choice == 1 {
-            check_ytdlp(&ui);
+            check_ytdlp_then(&ui, true);
         }
         // Steps 2 and 3 set up Spotify and YouTube; step 0 was the language.
         ui.set_onboarding_step(choice + 2);
@@ -211,6 +211,11 @@ fn engine_choice(config: &AppConfig) -> EngineChoice {
 
 /// Checks yt-dlp on a worker thread, since it can take a moment to start.
 fn check_ytdlp(ui: &MainWindow) {
+    check_ytdlp_then(ui, false);
+}
+
+/// Checks yt-dlp; with `install`, a missing or incomplete one is replaced by the app's own.
+fn check_ytdlp_then(ui: &MainWindow, install: bool) {
     let weak = ui.as_weak();
     let tool = engine_choice(&AppConfig::load_or_create().unwrap_or_default()).ytdlp;
     ui.set_ytdlp_status(t("Controllo yt-dlp…", "Checking yt-dlp…").into());
@@ -220,17 +225,52 @@ fn check_ytdlp(ui: &MainWindow) {
         let _ = weak.upgrade_in_event_loop(move |ui| {
             ui.set_ytdlp_found(complete);
             let status = match (version, complete) {
-                (Some(version), true) => format!("yt-dlp {version}"),
-                (Some(version), false) => format!(
-                    "yt-dlp {version}: {}",
-                    t(
-                        "manca un componente. Installa Deno e aggiorna con: pip install -U \"yt-dlp[default]\"",
-                        "a component is missing. Install Deno and update with: pip install -U \"yt-dlp[default]\"",
-                    )
-                ),
-                (None, _) => t("yt-dlp non è installato: senza, YouTube non può suonare.", "yt-dlp isn't installed: without it, YouTube can't play.").to_string(),
+                (Some(version), true) => format!("{} (yt-dlp {version})", t("Componenti per YouTube pronti", "YouTube components ready")),
+                (Some(_), false) => t("A yt-dlp manca una parte: installa i componenti per YouTube.", "yt-dlp is missing a part: install the YouTube components.").to_string(),
+                (None, _) => t("Mancano i componenti per YouTube.", "The YouTube components are missing.").to_string(),
             };
             ui.set_ytdlp_status(status.into());
+            if install && !complete {
+                install_youtube_tools(&ui);
+            }
+        });
+    });
+}
+
+/// Downloads yt-dlp and Deno into the app's folder, telling each step on screen.
+fn install_youtube_tools(ui: &MainWindow) {
+    if ui.get_tools_installing() {
+        return;
+    }
+    ui.set_tools_installing(true);
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let step_weak = weak.clone();
+        let result = app_core::tools::install(move |step| {
+            let text = match step {
+                app_core::tools::Step::YtDlp => t("Scarico yt-dlp (1 di 2)…", "Downloading yt-dlp (1 of 2)…"),
+                app_core::tools::Step::Deno => t("Scarico Deno (2 di 2)…", "Downloading Deno (2 of 2)…"),
+            };
+            let _ = step_weak.upgrade_in_event_loop(move |ui| ui.set_ytdlp_status(text.into()));
+        });
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            ui.set_tools_installing(false);
+            match result {
+                Ok(()) => {
+                    // The new yt-dlp only reaches the engine through a new resolver.
+                    change_engine(|_| {});
+                    check_ytdlp(&ui);
+                }
+                Err(e) => {
+                    eprintln!("YouTube components not installed: {e}");
+                    let text = if library::is_dns_problem(&e) || e.starts_with("network") {
+                        t("Download non riuscito: controlla la connessione (o la VPN) e riprova.", "Download failed: check the connection (or the VPN) and try again.")
+                    } else {
+                        t("Installazione non riuscita: riprova.", "Installation failed: try again.")
+                    };
+                    ui.set_ytdlp_status(text.into());
+                }
+            }
         });
     });
 }
@@ -274,7 +314,14 @@ fn wire_playback_settings(ui: &MainWindow, config: &AppConfig) {
             check_ytdlp(&ui);
         }
     });
-    ui.on_open_ytdlp_page(|| open_url(YTDLP_PAGE));
+    let weak = ui.as_weak();
+    ui.on_install_youtube_tools(move || {
+        if let Some(ui) = weak.upgrade() {
+            install_youtube_tools(&ui);
+        }
+    });
+    // The app's own yt-dlp follows YouTube's changes; in the background, at most once a day.
+    std::thread::spawn(app_core::tools::update_ytdlp);
 }
 
 /// Keeps the request counters in Settings current while that page is open.

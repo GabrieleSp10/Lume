@@ -270,7 +270,7 @@ pub fn engine_message(raw: &str) -> &'static str {
             "Can't reach YouTube: the site's name can't be found. If you use a VPN or a DNS filter, try turning it off.",
         ),
         r if r.starts_with("hls") || r.contains("hls.js") => t("YouTube ha dato un flusso che non si riesce a riprodurre. Provane un altro.", "YouTube gave a stream that can't be played. Try another one."),
-        r if r.contains("yt-dlp missing") => t("Per ascoltare da YouTube serve yt-dlp: trovi il link nelle Impostazioni.", "Playing from YouTube needs yt-dlp: the link is in Settings."),
+        r if r.contains("yt-dlp missing") => t("Mancano i componenti per YouTube: installali da Impostazioni › Avanzate › Riproduzione.", "The YouTube components are missing: install them from Settings › Advanced › Playback."),
         r if r.contains("cannot open YouTube login") => t("La finestra di accesso a YouTube non si è aperta. Riapri l'app e riprova.", "The YouTube login window didn't open. Reopen the app and try again."),
         r if r.contains("YouTube login not saved") => t("Accesso a YouTube non salvato: controlla lo spazio su disco e riprova.", "YouTube login not saved: check disk space and try again."),
         r if r.contains("not a bot") => t(
@@ -278,8 +278,8 @@ pub fn engine_message(raw: &str) -> &'static str {
             "YouTube blocked requests from this computer. Connect your YouTube account in Settings › Advanced › Playback, or try again in fifteen minutes.",
         ),
         r if r.contains("Requested format is not available") => t(
-            "YouTube non ha dato l'audio: aggiorna yt-dlp con «pip install -U \"yt-dlp[default]\"» e controlla che Deno sia installato.",
-            "YouTube gave no audio: update yt-dlp with «pip install -U \"yt-dlp[default]\"» and check that Deno is installed.",
+            "YouTube non ha dato l'audio di questo brano. Se succede con tutti, reinstalla i componenti per YouTube dalle Impostazioni.",
+            "YouTube gave no audio for this song. If it happens with all of them, reinstall the YouTube components from Settings.",
         ),
         r if r.contains("confirm your age") => t("Questo video è vietato ai minori: serve l'account YouTube collegato.", "This video is age-restricted: it needs your YouTube account connected."),
         r if r.contains("cookies") || r.contains("Could not copy") => t(
@@ -1584,7 +1584,7 @@ mod tests {
         assert_eq!(engine_message("engine not ready"), "Il player si sta avviando: riprova tra un attimo.");
         assert_eq!(engine_message("API PUT /me/player/play -> 403 Forbidden"), "Spotify non permette questa operazione.");
         assert_eq!(engine_message("something unknown"), "La riproduzione non è riuscita. Riprova.");
-        assert!(engine_message("yt-dlp missing: not found").contains("serve yt-dlp"));
+        assert!(engine_message("yt-dlp missing: not found").contains("componenti per YouTube"));
         assert!(engine_message("yt-dlp: ERROR: Sign in to confirm").contains("accesso"));
         assert!(engine_message("yt-dlp: ERROR: Sign in to confirm you're not a bot").contains("bloccato"));
         assert!(engine_message("yt-dlp: ERROR: Sign in to confirm your age").contains("minori"));
@@ -1603,7 +1603,7 @@ mod tests {
     fn import_errors_say_what_to_do() {
         assert!(import_message("not a spotify playlist link").contains("Spotify"));
         assert!(import_message("spotify embed: status 404").contains("pubblica"));
-        assert!(import_message("yt-dlp missing: x").contains("yt-dlp"));
+        assert!(import_message("yt-dlp missing: x").contains("componenti per YouTube"));
     }
 
     #[test]

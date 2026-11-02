@@ -1173,6 +1173,7 @@ export component MainWindow inherits Window {
     in property <bool> youtube-connected: false;
     in property <string> ytdlp-status;
     in property <bool> ytdlp-found;
+    in property <bool> tools-installing: false;
     in property <string> usage-window: "0";
     in property <string> usage-total: "0";
     in property <string> usage-busiest: "—";
@@ -1262,7 +1263,7 @@ export component MainWindow inherits Window {
     callback connect-youtube();
     callback disconnect-youtube();
     callback check-ytdlp();
-    callback open-ytdlp-page();
+    callback install-youtube-tools();
     callback onboarding-choose(int);
     callback onboarding-done();
     callback home-acted();
@@ -2330,7 +2331,12 @@ export component MainWindow inherits Window {
                                         if !root.ytdlp-found: HorizontalLayout {
                                             spacing: 12px;
                                             Text { text: root.ytdlp-status; color: Theme.danger; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; }
-                                            Button { ghost: true; height: 34px; label: L.t("Come installarlo", "How to install it"); clicked => { root.open-ytdlp-page(); } }
+                                            Button {
+                                                height: 34px;
+                                                enabled: !root.tools-installing;
+                                                label: root.tools-installing ? L.t("Installo…", "Installing…") : L.t("Installa componenti", "Install components");
+                                                clicked => { root.install-youtube-tools(); }
+                                            }
                                         }
                                         YouTubeAccount {
                                             connected: root.youtube-connected;
@@ -2928,8 +2934,8 @@ export component MainWindow inherits Window {
                         SectionTitle { text: L.t("Ascolta da YouTube", "Listen from YouTube"); }
                         Text {
                             text: root.ytdlp-found
-                                ? L.t("yt-dlp è pronto. Dopo, importa le tue playlist dalla pagina Playlist o cerca un brano.", "yt-dlp is ready. Next, import your playlists from the Playlists page or search for a song.")
-                                : L.t("Lume usa yt-dlp per prendere l'audio da YouTube. Installalo, poi premi Ricontrolla.", "Lume uses yt-dlp to get audio from YouTube. Install it, then press Check again.");
+                                ? L.t("Tutto pronto. Dopo, importa le tue playlist dalla pagina Playlist o cerca un brano.", "All set. Next, import your playlists from the Playlists page or search for a song.")
+                                : L.t("Lume installa da solo quello che serve per ascoltare da YouTube (circa 60 MB): attendi qualche istante.", "Lume installs what it needs to play from YouTube by itself (about 60 MB): wait a moment.");
                             color: Theme.text;
                             wrap: word-wrap;
                         }
@@ -2945,7 +2951,11 @@ export component MainWindow inherits Window {
                         if !root.ytdlp-found: HorizontalLayout {
                             alignment: start;
                             spacing: 10px;
-                            Button { ghost: true; label: L.t("Come installarlo", "How to install it"); clicked => { root.open-ytdlp-page(); } }
+                            Button {
+                                enabled: !root.tools-installing;
+                                label: root.tools-installing ? L.t("Installo…", "Installing…") : L.t("Riprova l'installazione", "Try installing again");
+                                clicked => { root.install-youtube-tools(); }
+                            }
                             Button { ghost: true; label: L.t("Ricontrolla", "Check again"); clicked => { root.check-ytdlp(); } }
                         }
                         HorizontalLayout {

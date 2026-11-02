@@ -94,6 +94,11 @@ pub fn cache_dir() -> PathBuf {
     dirs().data_local_dir().join("cache")
 }
 
+/// yt-dlp and Deno as the app installs them for YouTube.
+pub fn tools_dir() -> PathBuf {
+    dirs().data_local_dir().join("tools")
+}
+
 /// Playlists imported by the user and songs liked without Spotify: kept on logout.
 pub fn library_dir() -> PathBuf {
     dirs().data_local_dir().join("library")
