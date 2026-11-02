@@ -36,8 +36,6 @@ type SharedState = Arc<Mutex<Option<PlaybackState>>>;
 
 const POSITION_TICK_MS: u64 = 50;
 const LYRICS_PAGE: i32 = 6;
-/// Shows each lyric line slightly early: the eye expects it as the word starts.
-const LYRICS_LEAD_MS: u32 = 150;
 
 /// Where users create their own Spotify app.
 const SPOTIFY_DASHBOARD: &str = "https://developer.spotify.com/dashboard";
@@ -715,6 +713,8 @@ fn handle_event(ui: &MainWindow, event: Event, backend: &Backend, shared: &Share
             }
             ui.set_position_ms(state.position_ms as f32);
             ui.set_position_text(models::format_time(state.position_ms).into());
+            // A seek or a pause leaves the timer still: the lyric line follows here.
+            library::show_lyric_line(ui, state.position_ms);
             memory::on_state(&state);
             if state.track.is_some() {
                 library::with(|lib| lib.on_state_changed());
@@ -744,9 +744,7 @@ fn start_position_timer(ui: &MainWindow, shared: SharedState) {
         let elapsed = state.updated_at.elapsed().as_millis() as u32;
         let position = (state.position_ms + elapsed).min(state.duration_ms);
         if ui.get_page() == LYRICS_PAGE {
-            let (line, progress) = library::lyric_position(position + LYRICS_LEAD_MS);
-            ui.set_lyrics_current(line);
-            ui.set_lyrics_progress(progress);
+            library::show_lyric_line(&ui, position);
         }
         tick = tick.wrapping_add(1);
         if tick.is_multiple_of(5) {

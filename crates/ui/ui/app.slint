@@ -1146,6 +1146,8 @@ export component MainWindow inherits Window {
     in property <[LyricLine]> lyrics;
     in property <int> lyrics-current: -1;
     in property <float> lyrics-progress: 0; // how much of the current line has been sung
+    // False for plain text: it has no timings, so it cannot follow the song.
+    in property <bool> lyrics-synced: true;
     // 0 idle, 2 new page placed off to the side, about to slide in (see nav.rs)
     in property <int> page-phase: 0;
 
@@ -2459,6 +2461,22 @@ export component MainWindow inherits Window {
                                             mouse-cursor: line.time-ms >= 0 ? MouseCursor.pointer : MouseCursor.default;
                                             clicked => { root.seek-ms(line.time-ms); }
                                         }
+                                    }
+                                }
+                                // Drawn over the list, on a veil, so it never mixes with the lines.
+                                if root.lyrics-state.kind == 0 && !root.lyrics-synced: Rectangle {
+                                    x: 8px;
+                                    y: parent.height - self.height - 12px;
+                                    width: parent.width - 40px;
+                                    height: note.preferred-height + 16px;
+                                    border-radius: Theme.radius-small;
+                                    background: Theme.window-tint.with-alpha(0.9);
+                                    note := Text {
+                                        x: 12px;
+                                        width: parent.width - 24px;
+                                        text: L.t("Testo senza tempi: non segue la canzone. Cerco di nuovo quello sincronizzato tra due minuti.", "Lyrics without timings: they don't follow the song. Looking again for synced ones in two minutes.");
+                                        color: Theme.text-muted;
+                                        wrap: word-wrap;
                                     }
                                 }
                             }

@@ -53,7 +53,11 @@ const HISTORY_KEY: &str = "history";
 const HISTORY_SIZE: usize = 50;
 const LIKED_KEY: &str = "liked";
 /// Lets Spotify's player take a queued song before the panel asks for the queue.
+/// Shows each lyric line slightly early: the eye expects it as the word starts.
+pub const LYRICS_LEAD_MS: u32 = 150;
 const QUEUE_SETTLE: Duration = Duration::from_millis(800);
+/// Lyrics without timings are asked for again this long after, while the same song plays.
+const SYNCED_RETRY: Duration = Duration::from_secs(120);
 
 /// Fetches the tracks of a playlist, album or the liked songs (runs on a worker thread).
 type DetailLoader = Box<dyn FnOnce(&Api) -> Result<Vec<TrackSummary>, ApiError> + Send>;
@@ -180,6 +184,13 @@ pub fn lyric_position(position_ms: u32) -> (i32, f32) {
         let length = end.saturating_sub(start).max(1) as f32;
         (line as i32, ((position_ms - start) as f32 / length).min(1.0))
     })
+}
+
+/// Lights the lyric line for `position_ms`; the position timer does it while playing.
+pub fn show_lyric_line(ui: &MainWindow, position_ms: u32) {
+    let (line, progress) = lyric_position(position_ms + LYRICS_LEAD_MS);
+    ui.set_lyrics_current(line);
+    ui.set_lyrics_progress(progress);
 }
 
 pub fn page_state(kind: i32, title: &str, text: &str, action: &str) -> PageState {
@@ -1303,7 +1314,9 @@ impl Library {
             return;
         };
         if *self.lyrics_uri.borrow() == track.uri {
-            return; // already loaded or loading
+            // Already loaded (or loading): just put the line where the song is.
+            show_lyric_line(&ui, ui.get_position_ms() as u32);
+            return;
         }
         *self.lyrics_uri.borrow_mut() = track.uri.clone();
         LYRIC_TIMES.with(|t| t.borrow_mut().clear());
@@ -1330,7 +1343,22 @@ impl Library {
                             .map(|l| LyricLine { text: l.text.as_str().into(), time_ms: l.time_ms.map_or(-1, |t| t as i32) })
                             .collect();
                         ui.set_lyrics(ModelRc::from(Rc::new(VecModel::from(rows))));
+                        ui.set_lyrics_synced(synced);
                         ui.set_lyrics_state(content());
+                        // Paused, nothing moves the line: place it once from where the song is.
+                        show_lyric_line(&ui, ui.get_position_ms() as u32);
+                        if !synced {
+                            // Plain text is often only a stand-in while LRCLIB is busy: look again later.
+                            let again = uri.clone();
+                            Timer::single_shot(SYNCED_RETRY, move || {
+                                with(|lib| {
+                                    if models::now_uri() == again && *lib.lyrics_uri.borrow() == again {
+                                        lib.lyrics_uri.borrow_mut().clear();
+                                        lib.load_lyrics();
+                                    }
+                                });
+                            });
+                        }
                     }
                     Ok(Lyrics::Instrumental) => ui.set_lyrics_state(empty(t("Brano strumentale", "Instrumental"), t("Qui non c'è nulla da cantare.", "Nothing to sing here."))),
                     Ok(Lyrics::NotFound) => ui.set_lyrics_state(empty(t("Testo non trovato", "Lyrics not found"), t("Non abbiamo il testo di questo brano.", "We don't have the lyrics for this song."))),

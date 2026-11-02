@@ -94,8 +94,8 @@ fn is_synced(lines: &[LyricLine]) -> bool {
 
 /// Title without what lyric databases do not index: "(feat. X)", "- 2022 Remaster", "[Live]"…
 pub fn clean_title(title: &str) -> String {
-    const NOISE: [&str; 15] = [
-        "feat", "ft.", "with ", "remaster", "live", "version", "edit", "mix", "official", "video", "audio", "visual", "lyric", "testo", "prod",
+    const NOISE: [&str; 16] = [
+        "feat", "ft.", "with ", "remaster", "live", "version", "edit", "mix", "rmx", "official", "video", "audio", "visual", "lyric", "testo", "prod",
     ];
     let noisy = |part: &str| {
         let part = part.to_lowercase();
@@ -373,5 +373,6 @@ mod tests {
         assert_eq!(without_artist(&title, "KID YUGI"), "Feeling The Music");
         assert_eq!(without_artist("Song", "Artist"), "Song");
         assert_eq!(clean_title("Song (Official Video)"), "Song");
+        assert_eq!(clean_title("Ilva (Fume scure rmx) (feat. Fido Guido)"), "Ilva");
     }
 }
