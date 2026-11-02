@@ -1,0 +1,2963 @@
+// Main window. Every color, radius and spacing comes from `Theme`, which Rust fills
+// from the active theme file. The only literal colors are the white-on-dark captions
+// over cover art, which must stay readable whatever the theme.
+
+import { ListView, ScrollView } from "std-widgets.slint";
+
+export global Theme {
+    in-out property <color> primary: #b2b9ff;
+    // Text/icons drawn on the accent: dark on light accents, light on dark ones (set from Rust).
+    in-out property <color> on-primary: #101320;
+    in-out property <color> secondary: #5a5b7b;
+    in-out property <color> window-tint: #41424bdd;
+    // Veil under all content, stronger as the window gets more see-through, so text stays
+    // readable on bright wallpapers at any opacity (set from Rust).
+    in-out property <color> scrim: #0a0d1a40;
+    in-out property <color> panel: #26252654;
+    in-out property <color> surface: #ffffff17;
+    in-out property <color> text: #f2f4f8;
+    in-out property <color> text-muted: #c4cad8;
+    in-out property <color> border: #ffffff26;
+    in-out property <color> danger: #ff5c6c;
+    in-out property <length> radius-small: 6px;
+    in-out property <length> radius-medium: 10px;
+    in-out property <length> radius-large: 14px;
+    in-out property <length> spacing: 8px;
+    in-out property <length> font-size: 14px;
+    in-out property <string> font-family: "Segoe UI";
+}
+
+// The tooltip is drawn once, above everything, so no parent can clip or cover it.
+global Tip {
+    in-out property <string> text;
+    in-out property <length> x;
+    in-out property <length> y;
+    in-out property <bool> above: true;
+    // To the right of the element, centred on it: for buttons along the window's edge.
+    in-out property <bool> beside: false;
+}
+
+// Timings shared by every animation; turning them off in Settings zeroes them all.
+// Movement eases out with cubic-bezier(0.22, 1, 0.36, 1); only presses on icons and buttons bounce
+// (ease-out-back), as physical feedback. Colours and fades use plain ease-out.
+export global Motion {
+    in-out property <bool> on: true;
+    out property <duration> quick: self.on ? 90ms : 0ms;
+    out property <duration> base: self.on ? 170ms : 0ms;
+    out property <duration> slow: self.on ? 260ms : 0ms;
+}
+
+// Interface language. Rust keeps its own strings in step (see i18n.rs).
+export global L {
+    in-out property <bool> english: false;
+    public pure function t(italian: string, english-text: string) -> string {
+        return self.english ? english-text : italian;
+    }
+}
+
+// One row/card of content. kind: 0 track, 1 playlist, 2 album, 3 liked songs.
+export struct Item {
+    kind: int,
+    id: string,
+    uri: string,
+    title: string,
+    subtitle: string,
+    album: string,
+    duration: string,
+    duration-ms: int,
+    image-url: string,
+    image: image,
+    has-image: bool,
+    liked: bool,
+    explicit: bool,
+}
+
+export struct LyricLine {
+    text: string,
+    time-ms: int, // -1 when the lyrics are not time-synced
+}
+
+export struct ColorToken {
+    label: string,
+    hex: string,
+    color: color,
+}
+
+// What a page shows instead of its content. kind: 0 content, 1 loading, 2 empty, 3 error.
+export struct PageState {
+    kind: int,
+    title: string,
+    text: string,
+    action: string,
+}
+
+component FocusRing inherits Rectangle {
+    border-width: 2px;
+    border-color: Theme.primary;
+    background: transparent;
+}
+
+component IconButton inherits Rectangle {
+    in property <image> icon;
+    in property <image> active-icon: root.icon;
+    in property <length> icon-size: 20px;
+    in property <color> tint: Theme.text;
+    in property <color> hover-color: Theme.surface;
+    in property <bool> active: false;
+    in property <bool> enabled: true;
+    in property <string> label; // tooltip and screen-reader name
+    in property <string> shortcut; // shown after the label in the tooltip
+    in property <bool> tip-beside: false;
+    callback clicked;
+    width: 36px;
+    height: 36px;
+    border-radius: Theme.radius-small;
+    background: ta.has-hover && root.enabled ? root.hover-color : transparent;
+    opacity: root.enabled ? 1 : 0.4;
+    animate background, opacity { duration: Motion.quick; }
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.clicked(); }
+
+    changed label => {
+        if (self.hovered) {
+            Tip.text = root.label;
+        }
+    }
+
+    property <bool> hovered: ta.has-hover;
+    property <string> tip: root.shortcut == "" ? root.label : root.label + "  ·  " + root.shortcut;
+    changed hovered => {
+        if (self.hovered && root.label != "") {
+            Tip.text = self.tip;
+            Tip.beside = root.tip-beside;
+            Tip.x = root.tip-beside ? root.absolute-position.x + root.width + 8px : root.absolute-position.x + root.width / 2;
+            Tip.above = !root.tip-beside && root.absolute-position.y > 120px;
+            Tip.y = root.tip-beside ? root.absolute-position.y + root.height / 2 : root.absolute-position.y + (Tip.above ? 0px : root.height);
+        } else if (Tip.text == self.tip) {
+            Tip.text = "";
+        }
+    }
+
+    focus := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        key-pressed(e) => {
+            if (e.text == " " || e.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    HorizontalLayout {
+        alignment: center;
+        VerticalLayout {
+            alignment: center;
+            Image {
+                source: root.active ? root.active-icon : root.icon;
+                width: root.icon-size;
+                height: root.icon-size;
+                colorize: root.active ? Theme.primary : root.tint;
+                transform-scale: ta.pressed ? 0.84 : (ta.has-hover && root.enabled ? 1.08 : 1);
+                animate transform-scale { duration: Motion.base; easing: ease-out-back; }
+                animate colorize { duration: Motion.quick; }
+            }
+        }
+    }
+
+    if focus.has-focus: FocusRing { border-radius: parent.border-radius; }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Rounded square arrow next to section titles.
+component PagerButton inherits IconButton {
+    icon-size: 18px;
+    width: 36px;
+    height: 34px;
+    background: Theme.surface;
+    border-radius: Theme.radius-medium;
+}
+
+// Cover image, or a calm placeholder that does not look like a failed cover.
+component Art inherits Rectangle {
+    in property <image> img;
+    in property <bool> has-img: false;
+    in property <bool> liked-songs: false;
+    in property <float> zoom: 1;
+    border-radius: Theme.radius-small;
+    background: root.liked-songs ? @linear-gradient(135deg, Theme.primary, Theme.secondary) : Theme.surface;
+    clip: true;
+    if !root.has-img: Image {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: Math.min(parent.width, parent.height) * 0.34;
+        height: self.width;
+        source: root.liked-songs ? @image-url("icons/heart-filled.svg") : @image-url("icons/music.svg");
+        colorize: root.liked-songs ? #ffffff : Theme.text-muted;
+    }
+    if root.has-img: Image {
+        source: root.img;
+        width: parent.width;
+        height: parent.height;
+        image-fit: cover;
+        transform-scale: root.zoom;
+        animate transform-scale { duration: Motion.slow; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+    }
+}
+
+component ExplicitBadge inherits Rectangle {
+    width: 17px;
+    height: 17px;
+    border-radius: 3px;
+    background: Theme.text.with-alpha(0.22);
+    accessible-role: text;
+    accessible-label: L.t("Esplicito", "Explicit");
+    Text {
+        text: "E";
+        color: Theme.text;
+        font-size: 11px;
+        font-weight: 700;
+    }
+}
+
+component NavItem inherits Rectangle {
+    in property <image> icon;
+    in property <image> active-icon: root.icon;
+    in property <string> label;
+    in property <bool> active;
+    in property <bool> compact;
+    callback clicked;
+    height: 46px;
+    border-radius: Theme.radius-small;
+    background: !root.active && ta.has-hover ? Theme.text.with-alpha(0.06) : transparent;
+    animate background { duration: Motion.quick; }
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+
+    property <bool> hovered: ta.has-hover;
+    changed hovered => {
+        if (self.hovered && root.compact) {
+            Tip.text = root.label;
+            Tip.x = root.absolute-position.x + root.width + 50px;
+            Tip.above = false;
+            Tip.beside = false;
+            Tip.y = root.absolute-position.y - 2px;
+        } else if (Tip.text == root.label) {
+            Tip.text = "";
+        }
+    }
+
+    focus := FocusScope {
+        focus-on-click: false;
+        key-pressed(e) => {
+            if (e.text == " " || e.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 16px;
+        spacing: 14px;
+        alignment: start;
+        VerticalLayout {
+            alignment: center;
+            Image {
+                source: root.active ? root.active-icon : root.icon;
+                width: 22px;
+                height: 22px;
+                colorize: Theme.text;
+                transform-scale: ta.pressed ? 0.86 : (ta.has-hover ? 1.1 : 1);
+                animate transform-scale { duration: Motion.base; easing: ease-out-back; }
+            }
+        }
+        if !root.compact: Text {
+            text: root.label;
+            color: Theme.text;
+            vertical-alignment: center;
+            font-size: Theme.font-size * 1.05;
+        }
+    }
+
+    if focus.has-focus: FocusRing { border-radius: parent.border-radius; }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Slider that follows the pointer while dragging (`changed`) and reports the final
+// value on release (`seeked`). Left/Right move it when focused.
+component SeekBar inherits Rectangle {
+    in property <float> value; // 0.0 ..= 1.0
+    in property <bool> enabled: true;
+    in property <bool> knob: false;
+    in property <string> label;
+    callback seeked(float);
+    callback changed(float);
+    property <bool> dragging: false;
+    property <float> drag-value: 0;
+    property <float> shown: Math.clamp(self.dragging ? self.drag-value : self.value, 0, 1);
+    height: 18px;
+    opacity: root.enabled ? 1 : 0.4;
+    accessible-role: slider;
+    accessible-label: root.label;
+    accessible-value: Math.round(root.shown * 100) + "%";
+    accessible-enabled: root.enabled;
+
+    focus := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        key-pressed(e) => {
+            if (e.text == Key.LeftArrow || e.text == Key.RightArrow) {
+                let v = Math.clamp(root.value + (e.text == Key.LeftArrow ? -0.05 : 0.05), 0, 1);
+                root.changed(v);
+                root.seeked(v);
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.text.with-alpha(0.25);
+
+        Rectangle {
+            x: 0;
+            width: parent.width * root.shown;
+            border-radius: 2px;
+            background: (ta.has-hover || root.dragging) ? Theme.primary : Theme.text;
+            animate background { duration: Motion.quick; }
+        }
+    }
+
+    if root.enabled && (root.knob || root.dragging || ta.has-hover): Rectangle {
+        x: (parent.width - self.width) * root.shown;
+        y: (parent.height - self.height) / 2;
+        width: 14px;
+        height: 14px;
+        border-radius: 7px;
+        background: Theme.text;
+    }
+
+    if focus.has-focus: FocusRing { border-radius: 4px; }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                root.dragging = true;
+                root.drag-value = Math.clamp(self.mouse-x / self.width, 0, 1);
+                root.changed(root.drag-value);
+            } else if (e.kind == PointerEventKind.up && root.dragging) {
+                root.dragging = false;
+                root.seeked(Math.clamp(self.mouse-x / self.width, 0, 1));
+            }
+        }
+        moved => {
+            if (root.dragging) {
+                root.drag-value = Math.clamp(self.mouse-x / self.width, 0, 1);
+                root.changed(root.drag-value);
+            }
+        }
+    }
+}
+
+// Hue on the angle, saturation on the radius; `brightness` darkens it with a veil.
+// The wheel bitmap comes from Rust (`theme_editor::wheel_image`) with the same angle convention.
+component ColorWheel inherits Rectangle {
+    in property <image> wheel;
+    in property <float> hue;        // 0..1
+    in property <float> saturation; // 0..1
+    in property <float> brightness; // 0..1
+    callback picked(float, float);  // hue, saturation
+    width: 200px;
+    height: 200px;
+    accessible-role: image;
+    accessible-label: L.t("Ruota dei colori", "Color wheel");
+
+    Image { source: root.wheel; width: parent.width; height: parent.height; }
+    Rectangle { border-radius: self.width / 2; background: #000000.with-alpha(1 - root.brightness); }
+    Rectangle {
+        x: parent.width / 2 + root.saturation * Math.cos(root.hue * 360deg) * (parent.width / 2) - self.width / 2;
+        y: parent.height / 2 + root.saturation * Math.sin(root.hue * 360deg) * (parent.height / 2) - self.height / 2;
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        border-width: 3px;
+        border-color: #ffffff;
+        drop-shadow-blur: 4px;
+        drop-shadow-offset-y: 1px;
+        drop-shadow-color: #00000080;
+    }
+
+    ta := TouchArea {
+        property <float> nx: (self.mouse-x - self.width / 2) / (self.width / 2);
+        property <float> ny: (self.mouse-y - self.height / 2) / (self.height / 2);
+        property <float> turn: Math.atan2(self.ny, self.nx) / 360deg;
+        mouse-cursor: crosshair;
+        function pick() {
+            root.picked(self.turn < 0 ? self.turn + 1 : self.turn, Math.min(1, Math.sqrt(self.nx * self.nx + self.ny * self.ny)));
+        }
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                self.pick();
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                self.pick();
+            }
+        }
+    }
+}
+
+// On/off control with its label beside it.
+component SettingSwitch inherits HorizontalLayout {
+    in property <string> label;
+    in property <bool> on;
+    in property <length> label-width: 180px;
+    callback toggled();
+    spacing: 14px;
+    alignment: start;
+    Text { text: root.label; color: Theme.text; width: root.label-width; vertical-alignment: center; wrap: word-wrap; }
+    Rectangle {
+        width: 46px;
+        height: 26px;
+        border-radius: 13px;
+        background: root.on ? Theme.primary : Theme.text.with-alpha(0.15);
+        animate background { duration: Motion.base; }
+        accessible-role: switch;
+        accessible-label: root.label;
+        accessible-checked: root.on;
+        Rectangle {
+            x: root.on ? parent.width - self.width - 3px : 3px;
+            y: 3px;
+            width: 20px;
+            height: 20px;
+            border-radius: 10px;
+            background: root.on ? Theme.on-primary : Theme.text;
+            animate x { duration: Motion.base; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+        }
+        TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.toggled(); }
+        }
+    }
+}
+
+// One choice out of a few, with its label beside it.
+component SettingChips inherits HorizontalLayout {
+    in property <string> label;
+    in property <[string]> options;
+    in property <int> selected;
+    in property <length> label-width: 180px;
+    callback chosen(int);
+    spacing: 10px;
+    alignment: start;
+    Text { text: root.label; color: Theme.text; width: root.label-width; vertical-alignment: center; }
+    for name[i] in root.options: Rectangle {
+        height: 34px;
+        width: chip-text.preferred-width + 28px;
+        border-radius: 17px;
+        background: root.selected == i ? Theme.primary : (chip.has-hover ? Theme.text.with-alpha(0.12) : Theme.text.with-alpha(0.06));
+        animate background { duration: Motion.quick; }
+        accessible-role: button;
+        accessible-label: name;
+        accessible-checked: root.selected == i;
+        chip-text := Text { text: name; color: root.selected == i ? Theme.on-primary : Theme.text; font-weight: 600; }
+        chip := TouchArea { mouse-cursor: pointer; clicked => { root.chosen(i); } }
+    }
+}
+
+// Two joined options; the highlight slides to the chosen one.
+component SegmentedToggle inherits Rectangle {
+    in property <[string]> options;
+    in property <int> selected;
+    in property <length> segment-width: 52px;
+    callback chosen(int);
+    width: self.segment-width * 2;
+    height: 34px;
+    border-radius: 17px;
+    background: Theme.text.with-alpha(0.08);
+    Rectangle {
+        x: root.selected == 1 ? parent.width / 2 : 0px;
+        width: parent.width / 2;
+        border-radius: 17px;
+        background: Theme.primary;
+        animate x { duration: Motion.base; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+    }
+    for name[i] in root.options: Text {
+        x: i * parent.width / 2;
+        width: parent.width / 2;
+        height: parent.height;
+        text: name;
+        font-weight: 600;
+        color: root.selected == i ? Theme.on-primary : Theme.text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        animate color { duration: Motion.quick; }
+        accessible-role: button;
+        accessible-label: name;
+        accessible-checked: root.selected == i;
+        accessible-action-default => { root.chosen(i); }
+        TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.chosen(i); }
+        }
+    }
+}
+
+// A label and its value on one line; the numbers line up down the column.
+component StatRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    spacing: 14px;
+    Text { text: root.label; color: Theme.text-muted; width: 180px; }
+    Text { text: root.value; color: Theme.text; horizontal-stretch: 1; overflow: elide; }
+}
+
+// Labelled slider used by the theme editor.
+component SettingSlider inherits HorizontalLayout {
+    in property <string> label;
+    in property <float> value;
+    // What the value means (e.g. "12 px"); a percentage when empty.
+    in property <string> value-text;
+    in property <length> label-width: 180px;
+    callback changed(float);
+    spacing: 14px;
+    height: 34px;
+    Text { text: root.label; color: Theme.text; width: root.label-width; vertical-alignment: center; }
+    VerticalLayout { alignment: center; SeekBar { knob: true; label: root.label; value: root.value; changed(v) => { root.changed(v); } seeked(v) => { root.changed(v); } } }
+    Text { text: root.value-text != "" ? root.value-text : Math.round(root.value * 100) + "%"; color: Theme.text-muted; width: 52px; vertical-alignment: center; horizontal-alignment: right; }
+}
+
+component SectionTitle inherits Text {
+    color: Theme.text;
+    font-size: Theme.font-size * 1.7;
+    font-weight: 600;
+}
+
+component SubTitle inherits Text {
+    color: Theme.text;
+    font-size: Theme.font-size * 1.25;
+    font-weight: 600;
+}
+
+// Filled for the one main action of a view; `ghost` for everything else.
+component Button inherits Rectangle {
+    in property <string> label;
+    in property <bool> ghost: false;
+    in property <bool> danger: false;
+    in property <bool> enabled: true;
+    callback clicked;
+    height: 38px;
+    min-width: caption.preferred-width + 36px;
+    border-radius: Theme.radius-small;
+    opacity: root.enabled ? 1 : 0.4;
+    animate background, opacity { duration: Motion.quick; }
+    border-width: root.ghost ? 1px : 0px;
+    border-color: root.danger ? Theme.danger.with-alpha(0.6) : Theme.border;
+    background: root.ghost
+        ? (ta.has-hover && root.enabled ? Theme.text.with-alpha(0.08) : transparent)
+        : (ta.has-hover && root.enabled ? Theme.primary.brighter(0.08) : Theme.primary);
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.clicked(); }
+
+    focus := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        key-pressed(e) => {
+            if (e.text == " " || e.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+    caption := Text {
+        text: root.label;
+        color: root.ghost ? (root.danger ? Theme.danger : Theme.text) : Theme.on-primary;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        transform-scale: ta.pressed ? 0.95 : 1;
+        animate transform-scale { duration: Motion.quick; easing: ease-out-back; }
+    }
+    if focus.has-focus: FocusRing { border-radius: parent.border-radius; }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.clicked(); }
+    }
+}
+
+// A header that opens and closes the part under it.
+component Disclosure inherits Rectangle {
+    in property <string> label;
+    in property <length> text-size: Theme.font-size * 1.25;
+    in-out property <bool> open;
+    height: 44px;
+    border-radius: Theme.radius-small;
+    background: ta.has-hover ? Theme.text.with-alpha(0.05) : transparent;
+    animate background { duration: Motion.quick; }
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.open = !root.open; }
+    HorizontalLayout {
+        padding-right: 8px;
+        spacing: 10px;
+        Text { text: root.label; color: Theme.text; font-size: root.text-size; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
+        VerticalLayout {
+            alignment: center;
+            Image {
+                source: @image-url("icons/chevron-down.svg");
+                width: 18px;
+                height: 18px;
+                colorize: Theme.text-muted;
+                transform-rotation: root.open ? 180deg : 0deg;
+                animate transform-rotation { duration: Motion.base; easing: ease-out; }
+            }
+        }
+    }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.open = !root.open; } }
+}
+
+// Connects a Spotify app: used by first-run setup and by Settings.
+component SpotifySetup inherits VerticalLayout {
+    in property <string> client-id;
+    in property <string> redirect-uri;
+    in property <bool> logged-in;
+    callback save(string);
+    callback login();
+    callback logout();
+    callback open-dashboard();
+    property <bool> confirm-logout;
+    spacing: 10px;
+    Text {
+        text: root.logged-in
+            ? L.t("Il tuo account Spotify è collegato.", "Your Spotify account is connected.")
+            : (root.client-id == ""
+                ? L.t("Serve Spotify Premium e una tua app Spotify, gratuita:", "You need Spotify Premium and your own free Spotify app:")
+                : L.t("Client ID salvato: ora accedi.", "Client ID saved: now log in."));
+        color: Theme.text;
+        wrap: word-wrap;
+    }
+    if !root.logged-in && root.client-id == "": VerticalLayout {
+        spacing: 6px;
+        Text { text: L.t("1. Apri la dashboard di Spotify e crea un'app, attivando Web API e Web Playback SDK.", "1. Open the Spotify dashboard and create an app, enabling Web API and Web Playback SDK."); color: Theme.text-muted; wrap: word-wrap; }
+        Text { text: L.t("2. Come Redirect URI inserisci esattamente l'indirizzo qui sotto.", "2. As Redirect URI, enter exactly the address below."); color: Theme.text-muted; wrap: word-wrap; }
+        Text { text: L.t("3. Copia il Client ID dell'app, incollalo qui e premi Salva.", "3. Copy the app's Client ID, paste it here and press Save."); color: Theme.text-muted; wrap: word-wrap; }
+    }
+    HorizontalLayout {
+        spacing: 12px;
+        Text { text: "Redirect URI"; color: Theme.text; width: 110px; vertical-alignment: center; }
+        Rectangle {
+            height: 34px;
+            horizontal-stretch: 1;
+            border-radius: Theme.radius-small;
+            background: Theme.text.with-alpha(0.04);
+            border-width: 1px;
+            border-color: Theme.border;
+            // Selectable, so it can be copied into the dashboard.
+            TextInput {
+                x: 10px;
+                width: parent.width - 20px;
+                text: root.redirect-uri;
+                read-only: true;
+                color: Theme.text-muted;
+                selection-background-color: Theme.primary.with-alpha(0.4);
+                vertical-alignment: center;
+                single-line: true;
+                accessible-label: "Redirect URI";
+            }
+        }
+        Button { ghost: true; height: 34px; label: L.t("Apri dashboard", "Open dashboard"); clicked => { root.open-dashboard(); } }
+    }
+    HorizontalLayout {
+        spacing: 12px;
+        Text { text: "Client ID"; color: Theme.text; width: 110px; vertical-alignment: center; }
+        Rectangle {
+            height: 34px;
+            horizontal-stretch: 1;
+            border-radius: Theme.radius-small;
+            background: Theme.text.with-alpha(0.06);
+            border-width: 1px;
+            border-color: id-input.has-focus ? Theme.primary : Theme.border;
+            animate border-color { duration: Motion.quick; }
+            id-input := TextInput {
+                x: 10px;
+                width: parent.width - 20px;
+                text: root.client-id;
+                color: Theme.text;
+                selection-background-color: Theme.primary.with-alpha(0.4);
+                vertical-alignment: center;
+                single-line: true;
+                accessible-label: "Client ID";
+                accepted => { root.save(self.text); }
+            }
+        }
+        Button { height: 34px; ghost: root.client-id != ""; label: L.t("Salva", "Save"); clicked => { root.save(id-input.text); } }
+    }
+    HorizontalLayout {
+        alignment: start;
+        spacing: 10px;
+        if !root.logged-in && root.client-id != "": Button { label: L.t("Accedi a Spotify", "Log in to Spotify"); clicked => { root.login(); } }
+        if root.logged-in: Button {
+            ghost: true;
+            danger: true;
+            label: root.confirm-logout ? L.t("Conferma disconnessione", "Confirm log out") : L.t("Disconnetti", "Log out");
+            clicked => {
+                if (root.confirm-logout) {
+                    root.confirm-logout = false;
+                    root.logout();
+                } else {
+                    root.confirm-logout = true;
+                }
+            }
+        }
+    }
+    Timer {
+        interval: 4s;
+        running: root.confirm-logout;
+        triggered => { root.confirm-logout = false; }
+    }
+}
+
+// The YouTube account: connect it in a login window, or disconnect it.
+component YouTubeAccount inherits HorizontalLayout {
+    in property <bool> connected;
+    in property <length> label-width: 180px;
+    callback connect();
+    callback disconnect();
+    property <bool> confirm;
+    spacing: 14px;
+    alignment: start;
+    if root.label-width > 0: Text { text: L.t("Account YouTube", "YouTube account"); color: Theme.text; width: root.label-width; vertical-alignment: center; }
+    if root.connected: Text { text: L.t("Collegato", "Connected"); color: Theme.text; font-weight: 600; vertical-alignment: center; }
+    if root.connected: Button {
+        ghost: true;
+        danger: root.confirm;
+        height: 34px;
+        label: root.confirm ? L.t("Conferma", "Confirm") : L.t("Scollega", "Disconnect");
+        clicked => {
+            if (root.confirm) {
+                root.confirm = false;
+                root.disconnect();
+            } else {
+                root.confirm = true;
+            }
+        }
+    }
+    if !root.connected: Button { height: 34px; label: L.t("Collega account YouTube", "Connect YouTube account"); clicked => { root.connect(); } }
+    Timer { interval: 4s; running: root.confirm; triggered => { root.confirm = false; } }
+}
+
+// One of the first-run choices.
+component ChoiceCard inherits Rectangle {
+    in property <string> title;
+    in property <string> text;
+    in property <image> icon;
+    // Shown in the circle instead of the icon when set.
+    in property <string> badge;
+    callback clicked;
+    height: choice.preferred-height;
+    border-radius: Theme.radius-large;
+    background: ta.has-hover ? Theme.text.with-alpha(0.1) : Theme.text.with-alpha(0.05);
+    border-width: 1px;
+    border-color: ta.has-hover ? Theme.primary : Theme.border;
+    animate background, border-color { duration: Motion.quick; }
+    accessible-role: button;
+    accessible-label: root.title;
+    accessible-action-default => { root.clicked(); }
+    choice := HorizontalLayout {
+        padding: 20px;
+        spacing: 18px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 48px;
+                height: 48px;
+                border-radius: 24px;
+                background: Theme.primary.with-alpha(0.16);
+                if root.badge == "": Image { source: root.icon; width: 24px; height: 24px; colorize: Theme.primary; }
+                if root.badge != "": Text { text: root.badge; color: Theme.primary; font-weight: 700; font-size: Theme.font-size * 1.1; }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 6px;
+            SubTitle { text: root.title; }
+            Text { text: root.text; color: Theme.text-muted; wrap: word-wrap; }
+        }
+    }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+
+// Empty and error states: says what happened and offers the next step.
+component StateView inherits VerticalLayout {
+    in property <PageState> state;
+    in property <image> icon: @image-url("icons/music.svg");
+    callback acted();
+    alignment: center;
+    spacing: 8px;
+    padding: 32px;
+    HorizontalLayout {
+        alignment: center;
+        Image {
+            source: root.state.kind == 3 ? @image-url("icons/alert.svg") : root.icon;
+            width: 36px;
+            height: 36px;
+            colorize: root.state.kind == 3 ? Theme.danger : Theme.text-muted;
+            opacity: 0;
+            transform-scale: 0.7;
+            init => {
+                self.opacity = 1;
+                self.transform-scale = 1;
+            }
+            animate opacity { duration: Motion.slow; }
+            animate transform-scale { duration: Motion.slow; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+        }
+    }
+    Rectangle { height: 4px; }
+    Text {
+        text: root.state.title;
+        color: Theme.text;
+        font-size: Theme.font-size * 1.25;
+        font-weight: 600;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+    }
+    if root.state.text != "": Text {
+        text: root.state.text;
+        color: Theme.text-muted;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+    }
+    if root.state.action != "": HorizontalLayout {
+        alignment: center;
+        padding-top: 8px;
+        Button { label: root.state.action; clicked => { root.acted(); } }
+    }
+}
+
+// Placeholder bar that pulses softly while content loads.
+component Shimmer inherits Rectangle {
+    // Still when animations are off: the bar stays readable as a placeholder.
+    property <float> sweep: Motion.on ? Math.mod(animation-tick() / 1500ms, 1) * 1.6 - 0.3 : 0.5;
+    border-radius: Theme.radius-small;
+    background: @linear-gradient(100deg,
+        Theme.text.with-alpha(0.07) Math.max(0, self.sweep - 0.25),
+        Theme.text.with-alpha(0.17) Math.clamp(self.sweep, 0, 1),
+        Theme.text.with-alpha(0.07) Math.min(1, self.sweep + 0.25));
+}
+
+// Three dancing bars marking the song that is playing; they rest when it is paused.
+component Equalizer inherits HorizontalLayout {
+    in property <bool> playing;
+    property <int> step: self.playing && Motion.on ? Math.floor(animation-tick() / 130ms) : 0;
+    spacing: 2px;
+    alignment: center;
+    for phase[i] in [0.0, 2.1, 4.3]: VerticalLayout {
+        alignment: end;
+        Rectangle {
+            width: 3px;
+            height: root.playing ? 4px + 10px * Math.abs(Math.sin((root.step * 47 + phase * 60 + i * 31) * 1deg)) : 4px;
+            border-radius: 1px;
+            background: Theme.primary;
+            animate height { duration: 130ms; easing: ease-in-out; }
+        }
+    }
+}
+
+component SkeletonRow inherits HorizontalLayout {
+    height: 56px;
+    padding-left: 10px;
+    padding-right: 10px;
+    spacing: 14px;
+    Rectangle { width: 26px; }
+    VerticalLayout { alignment: center; Shimmer { width: 42px; height: 42px; } }
+    VerticalLayout {
+        alignment: center;
+        spacing: 8px;
+        horizontal-stretch: 1;
+        Shimmer { height: 12px; max-width: 260px; }
+        Shimmer { height: 10px; max-width: 160px; }
+    }
+}
+
+component TitleLine inherits HorizontalLayout {
+    in property <string> title;
+    in property <bool> explicit;
+    in property <bool> current;
+    in property <length> size: Theme.font-size;
+    spacing: 8px;
+    alignment: start;
+    Text { text: root.title; color: root.current ? Theme.primary : Theme.text; font-size: root.size; overflow: elide; }
+    if root.explicit: VerticalLayout { alignment: center; ExplicitBadge { } }
+}
+
+component TrackRow inherits Rectangle {
+    in property <Item> item;
+    in property <int> index;
+    in property <bool> current;
+    in property <bool> playing;
+    // Narrow lists (the queue panel) drop the number, the album and the queue button
+    // so the title keeps the room it needs.
+    in property <bool> compact: false;
+    // Off when every row would show the same cover.
+    in property <bool> show-art: true;
+    callback play();
+    callback like();
+    callback enqueue();
+    height: 56px;
+    border-radius: Theme.radius-small;
+    background: root.current ? Theme.primary.with-alpha(0.1) : (row.has-hover ? Theme.text.with-alpha(0.08) : transparent);
+    accessible-role: button;
+    accessible-label: root.item.title + ", " + root.item.subtitle;
+    accessible-action-default => { root.play(); }
+
+    focus := FocusScope {
+        focus-on-click: false;
+        key-pressed(e) => {
+            if (e.text == Key.Return) {
+                root.play();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    row := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.play(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 8px;
+        spacing: 14px;
+        if !root.compact: Rectangle {
+            width: 26px;
+            if root.current: Equalizer { x: 8px; y: (parent.height - self.height) / 2; height: 16px; playing: root.playing; }
+            if !root.current: Text { x: 0; width: parent.width; text: root.index + 1; color: Theme.text-muted; vertical-alignment: center; horizontal-alignment: right; }
+        }
+        if root.show-art: VerticalLayout {
+            alignment: center;
+            Art { width: 42px; height: 42px; img: root.item.image; has-img: root.item.has-image; }
+        }
+        VerticalLayout {
+            // Zero preferred widths make the two text columns split the space by stretch alone,
+            // so the album column lines up on every row.
+            horizontal-stretch: 2;
+            min-width: 60px;
+            preferred-width: 0px;
+            alignment: center;
+            spacing: 2px;
+            TitleLine { title: root.item.title; explicit: root.item.explicit; current: root.current; }
+            Text { text: root.item.subtitle; color: Theme.text-muted; overflow: elide; }
+        }
+        if !root.compact: Text {
+            horizontal-stretch: 1;
+            preferred-width: 0px;
+            text: root.item.album;
+            color: Theme.text-muted;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text { text: root.item.duration; color: Theme.text-muted; width: 40px; vertical-alignment: center; horizontal-alignment: right; }
+        VerticalLayout {
+            alignment: center;
+            IconButton {
+                icon: @image-url("icons/heart.svg");
+                active-icon: @image-url("icons/heart-filled.svg");
+                icon-size: 18px;
+                active: root.item.liked;
+                label: root.item.liked ? L.t("Togli dai preferiti", "Remove from favorites") : L.t("Aggiungi ai preferiti", "Add to favorites");
+                clicked => { root.like(); }
+            }
+        }
+        if !root.compact: VerticalLayout {
+            alignment: center;
+            IconButton { icon: @image-url("icons/queue-add.svg"); icon-size: 18px; label: L.t("Aggiungi alla coda", "Add to queue"); clicked => { root.enqueue(); } }
+        }
+    }
+
+    if focus.has-focus: FocusRing { border-radius: parent.border-radius; }
+}
+
+// Cover filling the whole card with its caption on top, as in the design.
+component Card inherits Rectangle {
+    in property <Item> item;
+    callback clicked;
+    border-radius: Theme.radius-medium;
+    clip: true;
+    opacity: 0;
+    init => { self.opacity = 1; }
+    animate opacity { duration: Motion.base; }
+    accessible-role: button;
+    accessible-label: root.item.title;
+    accessible-action-default => { root.clicked(); }
+
+    focus := FocusScope {
+        focus-on-click: false;
+        key-pressed(e) => {
+            if (e.text == " " || e.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    Art {
+        width: parent.width;
+        height: parent.height;
+        border-radius: 0;
+        img: root.item.image;
+        has-img: root.item.has-image;
+        liked-songs: root.item.kind == 3;
+        zoom: ta.has-hover ? 1.07 : 1;
+    }
+    Rectangle {
+        y: parent.height * 0.45;
+        height: parent.height * 0.55;
+        background: @linear-gradient(180deg, #00000000 0%, #000000c0 100%);
+    }
+    Rectangle {
+        background: ta.has-hover ? #ffffff14 : #ffffff00;
+        animate background { duration: Motion.base; }
+    }
+    VerticalLayout {
+        padding: 14px;
+        spacing: 2px;
+        alignment: end;
+        Text { text: root.item.title; color: #ffffff; font-size: Theme.font-size * 1.2; font-weight: 600; overflow: elide; }
+        Text { text: root.item.subtitle; color: #ffffffd9; overflow: elide; }
+    }
+    if focus.has-focus: FocusRing { border-radius: parent.border-radius; }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+component QueuePanel inherits Rectangle {
+    in property <[Item]> items;
+    in property <PageState> state;
+    in property <string> now-uri;
+    in property <bool> playing;
+    callback play(int);
+    callback like(int);
+    callback close();
+    VerticalLayout {
+        padding: 16px;
+        padding-top: 2px;
+        spacing: 8px;
+        HorizontalLayout {
+            SubTitle { text: L.t("Coda di riproduzione", "Queue"); vertical-alignment: center; horizontal-stretch: 1; }
+            IconButton { icon: @image-url("icons/close.svg"); icon-size: 16px; label: L.t("Chiudi la coda", "Close queue"); clicked => { root.close(); } }
+        }
+        if root.state.kind == 1: VerticalLayout { for i in 5: SkeletonRow { } }
+        if root.state.kind >= 2: StateView {
+            vertical-stretch: 1;
+            state: root.state;
+            icon: @image-url("icons/queue.svg");
+        }
+        if root.state.kind == 0: ListView {
+            for item[i] in root.items: TrackRow {
+                item: item;
+                index: i;
+                compact: true;
+                current: item.uri == root.now-uri;
+                playing: root.playing;
+                play => { root.play(i); }
+                like => { root.like(i); }
+            }
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    // ---- state pushed from Rust ----
+    in property <int> page: 0; // 0 home, 1 search, 2 playlists, 3 history, 4 settings, 5 detail, 6 lyrics
+    in property <bool> can-back;
+    in property <bool> can-forward;
+    in property <bool> logged-in;
+    in property <bool> engine-ready;
+    in property <bool> playing;
+    in property <bool> has-track;
+    in property <string> now-uri;
+    in property <string> track-title;
+    in property <string> track-artist;
+    in property <image> now-art;
+    in property <bool> now-has-art;
+    in property <bool> now-liked;
+    in property <float> position-ms;
+    in property <float> duration-ms;
+    in property <string> position-text: "0:00";
+    in property <string> duration-text: "0:00";
+    in-out property <float> volume: 0.7;
+    in-out property <bool> muted: false;
+    in property <bool> shuffle-on;
+    in property <int> repeat-mode;
+    in property <bool> is-maximized;
+
+    in property <PageState> home-state;
+    in property <[Item]> quick-picks;
+    in property <[Item]> playlists;
+    in-out property <string> search-text;
+    in property <PageState> search-state;
+    in property <[string]> recent-searches;
+    in property <[Item]> results-tracks;
+    in property <[Item]> results-albums;
+    in property <[Item]> results-playlists;
+    in property <PageState> detail-state;
+    in property <[Item]> detail-tracks;
+    in property <string> detail-title;
+    in property <string> detail-subtitle;
+    in property <image> detail-art;
+    in property <bool> detail-has-art;
+    in property <bool> detail-liked-songs;
+    in property <PageState> history-state;
+    in property <[Item]> history;
+    in property <PageState> queue-state;
+    in property <[Item]> queue-items;
+    in-out property <bool> queue-open: false;
+    in property <string> toast;
+    in property <string> toast-action;
+    in property <PageState> lyrics-state;
+    in property <[LyricLine]> lyrics;
+    in property <int> lyrics-current: -1;
+    in property <float> lyrics-progress: 0; // how much of the current line has been sung
+    // 0 idle, 2 new page placed off to the side, about to slide in (see nav.rs)
+    in property <int> page-phase: 0;
+
+    // theme editor
+    in property <[ColorToken]> theme-colors;
+    in-out property <int> edit-index: 0;
+    in property <image> color-wheel;
+    in-out property <float> edit-h;
+    in-out property <float> edit-s;
+    in-out property <float> edit-v;
+    in-out property <float> edit-a;
+    in property <float> window-opacity;
+    in property <[string]> saved-themes;
+    in-out property <string> theme-name;
+    in property <string> client-id;
+    in property <string> redirect-uri;
+    in property <float> radius-value;
+    in property <float> text-size-value;
+    in property <int> material-index;
+
+    // playback engine: 0 Spotify, 1 YouTube, 2 librespot
+    in-out property <int> engine-index: 0;
+    in property <bool> youtube-connected: false;
+    in property <string> ytdlp-status;
+    in property <bool> ytdlp-found;
+    in property <string> usage-window: "0";
+    in property <string> usage-total: "0";
+    in property <string> usage-busiest: "—";
+    in property <bool> usage-playback-blocked;
+    in property <string> usage-note;
+    in-out property <bool> advanced-open: false;
+    in-out property <bool> playback-details-open: false;
+
+    // first run: 0 language, 1 Spotify or YouTube, 2 Spotify setup, 3 YouTube setup
+    in-out property <bool> onboarding: false;
+    in-out property <int> onboarding-step: 0;
+
+    // importing playlists: source 0 Spotify, 1 YouTube
+    in-out property <bool> import-open: false;
+    in property <bool> import-busy: false;
+    in-out property <int> import-source: 0;
+    in-out property <string> import-url;
+    in property <bool> detail-local: false;
+    in property <bool> detail-uniform-art: false;
+    // "Imported from Spotify", and why some songs are missing, for imported playlists.
+    in property <string> detail-source;
+    in property <string> detail-note;
+    // Overrides the song count of the subtitle ("100 of 270 songs").
+    in property <string> detail-count;
+    // A song was asked for and no sound has come yet.
+    in-out property <bool> track-loading: false;
+    in-out property <bool> colors-open: false;
+    in-out property <bool> shortcuts-open: false;
+    // A tooltip must not outlive the view that showed it.
+    changed immersive => { Tip.text = ""; }
+    changed page => { Tip.text = ""; }
+    property <bool> confirm-remove: false;
+
+    // ---- user actions ----
+    callback login();
+    callback logout();
+    callback play-pause();
+    callback next();
+    callback prev();
+    callback seek(float);
+    callback seek-relative(int);
+    callback set-volume(float);
+    callback language-changed(bool);
+    callback animations-changed(bool);
+    callback toggle-shuffle();
+    callback toggle-repeat();
+    callback minimize();
+    callback toggle-maximize();
+    callback close-app();
+    callback drag-window();
+    callback resize-edge(int);
+    callback search-edited(string);
+    callback search-submit(string);
+    callback open-item(int, int);          // source (0 library, 1 albums, 2 playlists), index
+    callback play-track(int, int);         // source (0 quick, 1 results, 2 detail, 3 history, 4 queue), index
+    callback like-item(int, int);
+    callback enqueue-item(int, int);
+    callback play-detail();
+    callback like-current();
+    callback queue-toggled();
+    callback nav-to(int);
+    callback nav-back();
+    callback nav-forward();
+    callback refresh(int);
+    callback set-volume-live(float);
+    callback seek-ms(int);
+    callback toast-acted();
+    callback select-color(int);
+    callback hsv-edited(int, float, float, float, float); // index, hue, saturation, value, alpha
+    callback hex-entered(int, string);
+    callback preset-accent(color);
+    callback window-opacity-edited(float);
+    callback radius-edited(float);
+    callback text-size-edited(float);
+    callback set-material(int);
+    callback reset-theme();
+    callback open-themes-folder();
+    callback save-theme(string);
+    callback delete-theme(string);
+    callback import-theme();
+    callback theme-file-picked(string);
+    callback set-fullscreen(bool);
+    callback apply-theme(string);
+    callback client-id-entered(string);
+    callback open-spotify-dashboard();
+    callback engine-changed(int);
+    callback connect-youtube();
+    callback disconnect-youtube();
+    callback check-ytdlp();
+    callback open-ytdlp-page();
+    callback onboarding-choose(int);
+    callback onboarding-done();
+    callback home-acted();
+    callback import-playlist(int, string);
+    callback remove-local-playlist();
+
+    in-out property <bool> library-open: true;
+    in-out property <bool> sidebar-open: true;
+    in-out property <bool> sidebar-peek: false;
+    // Immersive view: only cover, title and lyrics are left on screen.
+    in-out property <bool> immersive: false;
+    property <bool> immersive-opened-lyrics: false;
+    // Real full screen, offered inside the immersive view and left together with it.
+    in-out property <bool> os-fullscreen: false;
+    in-out property <int> quick-offset: 0;
+    in-out property <int> card-offset: 0;
+    in-out property <bool> confirm-logout: false;
+
+    // Layout switches by window width. Updated in a change handler, not a binding: the
+    // layout's own size depends on them.
+    property <bool> narrow: false;
+    property <bool> queue-docked: true;
+    changed width => {
+        self.narrow = self.width < 1100px;
+        self.queue-docked = self.width >= 1240px;
+    }
+    property <length> queue-width: 370px;
+    property <bool> shown: false;
+    property <bool> closing: false;
+    property <float> shown-volume: root.muted ? 0 : root.volume;
+    property <bool> sidebar-wide: root.narrow ? root.sidebar-peek : root.sidebar-open;
+    property <length> page-x: Theme.spacing * 2.5;
+
+    // Called on navigation: a removed page takes keyboard focus with it.
+    public function focus-main() {
+        keys.focus();
+    }
+
+    function toggle-lyrics() {
+        if (root.page == 6) {
+            root.nav-back();
+        } else {
+            root.nav-to(6);
+        }
+    }
+
+    function toggle-queue() {
+        root.queue-open = !root.queue-open;
+        root.queue-toggled();
+    }
+
+    function toggle-immersive() {
+        if (root.immersive) {
+            root.immersive = false;
+            if (root.os-fullscreen) {
+                root.os-fullscreen = false;
+                root.set-fullscreen(false);
+            }
+            if (root.immersive-opened-lyrics) {
+                root.nav-back();
+            }
+        } else {
+            root.immersive = true;
+            root.queue-open = false;
+            root.immersive-opened-lyrics = root.page != 6;
+            root.nav-to(6);
+        }
+    }
+
+    function toggle-mute() {
+        root.muted = !root.muted;
+        root.set-volume(root.muted ? 0 : root.volume);
+    }
+
+    // Moving the volume always unmutes.
+    function volume-to(value: float, live: bool) {
+        root.volume = value;
+        root.muted = false;
+        if (live) {
+            root.set-volume-live(value);
+        } else {
+            root.set-volume(value);
+        }
+    }
+
+    function close-animated() {
+        root.closing = true;
+        root.shown = false;
+    }
+
+    title: "Lume";
+    icon: @image-url("lume.png");
+    no-frame: true;
+    background: transparent;
+    min-width: 980px;
+    min-height: 640px;
+    preferred-width: 1280px;
+    preferred-height: 840px;
+    default-font-family: Theme.font-family;
+    default-font-size: Theme.font-size;
+    forward-focus: keys;
+
+    // Opening: let the first frame reach the screen, then slide in.
+    Timer {
+        interval: 80ms;
+        running: !root.shown && !root.closing;
+        triggered => { root.shown = true; }
+    }
+    // Closing: slide out, then actually quit.
+    Timer {
+        interval: Motion.on ? 220ms : 1ms;
+        running: root.closing;
+        triggered => { root.close-app(); }
+    }
+
+    keys := FocusScope {
+        key-pressed(e) => {
+            if (e.text == Key.Escape) {
+                if (root.immersive) {
+                    root.toggle-immersive();
+                    return accept;
+                }
+                if (root.queue-open) {
+                    root.toggle-queue();
+                    return accept;
+                }
+                self.focus();
+                return accept;
+            }
+            if (e.modifiers.control && e.text == "f") {
+                root.nav-to(1);
+                return accept;
+            }
+            if (e.modifiers.control && e.text == Key.LeftArrow) {
+                root.prev();
+                return accept;
+            }
+            if (e.modifiers.control && e.text == Key.RightArrow) {
+                root.next();
+                return accept;
+            }
+            if (e.modifiers.control && e.text == "m") {
+                root.toggle-mute();
+                return accept;
+            }
+            if (e.modifiers.control && e.text == "l") {
+                root.toggle-lyrics();
+                return accept;
+            }
+            if (e.modifiers.control && e.text == "q") {
+                root.toggle-queue();
+                return accept;
+            }
+            if (e.text == Key.F11) {
+                root.toggle-immersive();
+                return accept;
+            }
+            if (e.modifiers.control || e.modifiers.alt) {
+                return reject;
+            }
+            if (e.text == " ") {
+                root.play-pause();
+                return accept;
+            }
+            if (e.text == Key.LeftArrow) {
+                root.seek-relative(-5000);
+                return accept;
+            }
+            if (e.text == Key.RightArrow) {
+                root.seek-relative(5000);
+                return accept;
+            }
+            if (e.text == Key.UpArrow || e.text == Key.DownArrow) {
+                root.volume-to(Math.clamp(root.volume + (e.text == Key.UpArrow ? 0.05 : -0.05), 0, 1), false);
+                return accept;
+            }
+            return reject;
+        }
+
+        Rectangle {
+            y: root.shown ? 0px : 22px;
+            opacity: root.shown ? 1 : 0;
+            animate y { duration: Motion.slow; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+            animate opacity { duration: Motion.base; easing: ease-out; }
+            background: Theme.window-tint;
+            border-radius: root.is-maximized || root.os-fullscreen ? 0px : 8px;
+            border-width: root.is-maximized || root.os-fullscreen ? 0px : 1px;
+            border-color: Theme.border;
+            clip: true;
+
+            Rectangle { background: Theme.scrim; }
+
+            VerticalLayout {
+                // ---------- title bar ----------
+                Rectangle {
+                    height: root.immersive ? 0px : 58px;
+                    clip: true;
+                    animate height { duration: Motion.base; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+                    TouchArea {
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                                root.drag-window();
+                            }
+                        }
+                        double-clicked => { root.toggle-maximize(); }
+                    }
+                    HorizontalLayout {
+                        padding-left: 18px;
+                        padding-right: 10px;
+                        spacing: 8px;
+                        VerticalLayout {
+                            alignment: center;
+                            IconButton {
+                                icon: @image-url("icons/menu.svg");
+                                width: 38px;
+                                height: 38px;
+                                background: Theme.surface;
+                                label: root.sidebar-wide ? L.t("Riduci il menu", "Collapse menu") : L.t("Espandi il menu", "Expand menu");
+                                tip-beside: true;
+                                clicked => {
+                                    if (root.narrow) {
+                                        root.sidebar-peek = !root.sidebar-peek;
+                                    } else {
+                                        root.sidebar-open = !root.sidebar-open;
+                                    }
+                                }
+                            }
+                        }
+                        Rectangle { width: 24px; }
+                        VerticalLayout { alignment: center; IconButton { icon: @image-url("icons/back.svg"); label: L.t("Indietro", "Back"); enabled: root.can-back; clicked => { root.nav-back(); } } }
+                        VerticalLayout { alignment: center; IconButton { icon: @image-url("icons/forward.svg"); label: L.t("Avanti", "Forward"); enabled: root.can-forward; clicked => { root.nav-forward(); } } }
+                        VerticalLayout { alignment: center; IconButton { icon: @image-url("icons/refresh.svg"); label: L.t("Aggiorna questa pagina", "Reload this page"); clicked => { root.refresh(root.page); } } }
+                        Rectangle { horizontal-stretch: 1; }
+                        VerticalLayout { alignment: center; IconButton { icon: @image-url("icons/minimize.svg"); width: 54px; label: L.t("Riduci a icona", "Minimize"); clicked => { root.minimize(); } } }
+                        VerticalLayout { alignment: center; IconButton { icon: @image-url("icons/maximize.svg"); icon-size: 18px; width: 54px; label: root.is-maximized ? L.t("Ripristina", "Restore") : L.t("Ingrandisci", "Maximize"); clicked => { root.toggle-maximize(); } } }
+                        VerticalLayout { alignment: center; IconButton { icon: @image-url("icons/close.svg"); width: 54px; hover-color: Theme.danger; label: L.t("Chiudi", "Close"); clicked => { root.close-animated(); } } }
+                    }
+                }
+
+                // ---------- body ----------
+                HorizontalLayout {
+                    vertical-stretch: 1;
+
+                    // sidebar
+                    Rectangle {
+                        width: root.immersive ? 0px : (root.sidebar-wide ? 262px : 74px);
+                        animate width { duration: Motion.base; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+                        clip: true;
+                        Rectangle {
+                            x: 6px;
+                            y: root.page * 48px;
+                            width: parent.width - 18px;
+                            height: 46px;
+                            border-radius: Theme.radius-small;
+                            background: Theme.surface;
+                            opacity: root.page <= 4 ? 1 : 0;
+                            animate y { duration: Motion.base; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+                            animate opacity { duration: Motion.quick; }
+                            Rectangle {
+                                x: 0;
+                                y: 13px;
+                                width: 3px;
+                                height: 20px;
+                                border-radius: 2px;
+                                background: Theme.primary;
+                            }
+                        }
+                        VerticalLayout {
+                            padding-left: 6px;
+                            padding-right: 12px;
+                            spacing: 2px;
+                            alignment: start;
+                            NavItem { icon: @image-url("icons/home.svg"); active-icon: @image-url("icons/home-filled.svg"); compact: !root.sidebar-wide; label: "Home"; active: root.page == 0; clicked => { root.nav-to(0); } }
+                            NavItem { icon: @image-url("icons/search.svg"); compact: !root.sidebar-wide; label: L.t("Cerca", "Search"); active: root.page == 1; clicked => { root.nav-to(1); } }
+                            NavItem { icon: @image-url("icons/playlists.svg"); compact: !root.sidebar-wide; label: L.t("Playlist", "Playlists"); active: root.page == 2; clicked => { root.nav-to(2); } }
+                            NavItem { icon: @image-url("icons/history.svg"); compact: !root.sidebar-wide; label: L.t("Cronologia", "History"); active: root.page == 3; clicked => { root.nav-to(3); } }
+                            NavItem { icon: @image-url("icons/settings.svg"); compact: !root.sidebar-wide; label: L.t("Impostazioni", "Settings"); active: root.page == 4; clicked => { root.nav-to(4); } }
+                            if root.sidebar-wide: VerticalLayout {
+                                spacing: 2px;
+                                Rectangle { height: 14px; }
+                                Rectangle { height: 1px; background: Theme.border; }
+                                Rectangle { height: 12px; }
+                                Rectangle {
+                                    height: 36px;
+                                    accessible-role: button;
+                                    accessible-label: L.t("Libreria", "Library");
+                                    HorizontalLayout {
+                                        padding-left: 16px;
+                                        padding-right: 12px;
+                                        Text { text: L.t("Libreria", "Library"); color: Theme.text-muted; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Image {
+                                                source: @image-url("icons/chevron-down.svg");
+                                                width: 18px;
+                                                height: 18px;
+                                                colorize: Theme.text-muted;
+                                                transform-rotation: root.library-open ? 0deg : -90deg;
+                                                animate transform-rotation { duration: Motion.base; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+                                            }
+                                        }
+                                    }
+                                    TouchArea { mouse-cursor: pointer; clicked => { root.library-open = !root.library-open; } }
+                                }
+                                if root.library-open: VerticalLayout {
+                                    spacing: 2px;
+                                    for card[i] in root.playlists: Rectangle {
+                                        height: i < 8 ? 32px : 0px;
+                                        visible: i < 8;
+                                        border-radius: Theme.radius-small;
+                                        background: lib-row.has-hover ? Theme.text.with-alpha(0.06) : transparent;
+                                        accessible-role: button;
+                                        accessible-label: card.title;
+                                        Text { x: 16px; width: parent.width - 28px; text: card.title; color: Theme.text; vertical-alignment: center; overflow: elide; }
+                                        lib-row := TouchArea { mouse-cursor: pointer; clicked => { root.open-item(0, i); } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Content area. Nothing in here is part of the window's layout: sizes and
+                    // limits of pages or of the queue must never resize the window.
+                    Rectangle {
+                        horizontal-stretch: 1;
+
+                        Rectangle { x: 0; width: 1px; background: Theme.border; opacity: root.immersive ? 0 : 1; }
+
+                        Rectangle {
+                        x: root.page-phase == 2 ? 18px : 0px;
+                        width: parent.width - (root.queue-open && root.queue-docked ? root.queue-width + 8px : 0px);
+                        height: parent.height;
+                        opacity: root.page-phase == 0 ? 1 : 0.4;
+                        animate x { duration: root.page-phase == 2 ? 0ms : Motion.base; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+                        animate opacity { duration: root.page-phase == 2 ? 0ms : Motion.base; }
+                        animate width { duration: Motion.base; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+
+                        // ===== home =====
+                        if root.page == 0: Rectangle {
+                            if root.home-state.kind >= 2: StateView {
+                                state: root.home-state;
+                                acted => { root.home-acted(); }
+                            }
+                            if root.home-state.kind < 2: ScrollView {
+                                mouse-drag-pan-enabled: false;
+                                horizontal-scrollbar-policy: always-off;
+                                content-width: self.visible-width;
+                                content-height: home.preferred-height;
+                                home := VerticalLayout {
+                                    padding-left: root.page-x;
+                                    padding-right: root.page-x;
+                                    padding-bottom: 16px;
+                                    spacing: 12px;
+                                    alignment: start;
+
+                                    // what is playing (or will resume): the song's own cover sets the mood
+                                    if root.has-track: Rectangle {
+                                        height: 180px;
+                                        border-radius: Theme.radius-large;
+                                        background: Theme.surface;
+                                        clip: true;
+                                        if root.now-has-art: Image {
+                                            width: parent.width;
+                                            height: parent.height;
+                                            source: root.now-art;
+                                            image-fit: cover;
+                                            opacity: 0.28;
+                                            transform-scale: 1.4;
+                                        }
+                                        Rectangle { background: @linear-gradient(90deg, Theme.window-tint.with-alpha(0.92) 0%, Theme.window-tint.with-alpha(0.35) 100%); }
+                                        HorizontalLayout {
+                                            padding: 20px;
+                                            spacing: 22px;
+                                            Art { width: 140px; height: 140px; img: root.now-art; has-img: root.now-has-art; border-radius: Theme.radius-medium; }
+                                            VerticalLayout {
+                                                alignment: center;
+                                                spacing: 6px;
+                                                Text { text: root.track-title; color: Theme.text; font-size: Theme.font-size * 2; font-weight: 700; overflow: elide; }
+                                                Text { text: root.track-loading ? L.t("Avvio del brano…", "Starting the song…") : root.track-artist; color: Theme.text-muted; font-size: Theme.font-size * 1.1; overflow: elide; }
+                                                Rectangle { height: 8px; }
+                                                HorizontalLayout {
+                                                    alignment: start;
+                                                    spacing: 10px;
+                                                    Button {
+                                                        label: root.playing ? L.t("Pausa", "Pause") : (root.position-ms > 1000 ? L.t("Riprendi", "Resume") : L.t("Riproduci", "Play"));
+                                                        enabled: !root.track-loading;
+                                                        clicked => { root.play-pause(); }
+                                                    }
+                                                    Button { ghost: true; label: L.t("Testo", "Lyrics"); clicked => { root.toggle-lyrics(); } }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // quick picks: pages of tiles, one or two columns by width
+                                    quick := Rectangle {
+                                        property <int> cols: self.width < 620px ? 1 : 2;
+                                        property <int> page-size: self.cols * 5;
+                                        property <int> shown: root.home-state.kind == 1 ? self.page-size : Math.min(self.page-size, root.quick-picks.length - root.quick-offset);
+                                        height: 52px + Math.max(1, Math.ceil(self.shown / self.cols)) * 70px;
+                                        SectionTitle { x: 0px; y: 4px; text: L.t("Scelte rapide", "Quick picks"); }
+                                        if root.quick-picks.length > quick.page-size: HorizontalLayout {
+                                            x: parent.width - self.preferred-width;
+                                            y: 2px;
+                                            height: 34px;
+                                            spacing: 10px;
+                                            PagerButton {
+                                                icon: @image-url("icons/chevron-left.svg");
+                                                label: L.t("Precedenti", "Previous");
+                                                enabled: root.quick-offset > 0;
+                                                clicked => { root.quick-offset = Math.max(0, root.quick-offset - quick.page-size); }
+                                            }
+                                            PagerButton {
+                                                icon: @image-url("icons/chevron-right.svg");
+                                                label: L.t("Successivi", "Next");
+                                                enabled: root.quick-offset + quick.page-size < root.quick-picks.length;
+                                                clicked => { root.quick-offset += quick.page-size; }
+                                            }
+                                        }
+                                        if root.home-state.kind == 1: Rectangle {
+                                            for i in parent.page-size: HorizontalLayout {
+                                                x: Math.mod(i, quick.cols) * (parent.width / quick.cols);
+                                                y: 48px + Math.floor(i / quick.cols) * 70px;
+                                                width: parent.width / quick.cols - 8px;
+                                                height: 66px;
+                                                padding: 4px;
+                                                spacing: 16px;
+                                                Shimmer { width: 58px; height: 58px; }
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    spacing: 8px;
+                                                    Shimmer { height: 13px; max-width: 200px; }
+                                                    Shimmer { height: 11px; max-width: 130px; }
+                                                }
+                                            }
+                                        }
+                                        if root.home-state.kind == 0 && root.quick-picks.length == 0: Text {
+                                            x: 0px;
+                                            y: 52px;
+                                            text: L.t("Ascolta qualcosa e comparirà qui.", "Play something and it will show up here.");
+                                            color: Theme.text-muted;
+                                        }
+                                        for item[i] in root.quick-picks: Rectangle {
+                                            property <int> rel: i - root.quick-offset;
+                                            visible: root.home-state.kind == 0 && self.rel >= 0 && self.rel < parent.page-size;
+                                            x: Math.mod(Math.max(self.rel, 0), parent.cols) * (parent.width / parent.cols);
+                                            y: 48px + Math.floor(Math.max(self.rel, 0) / parent.cols) * 70px;
+                                            width: parent.width / parent.cols - 8px;
+                                            height: 66px;
+                                            border-radius: Theme.radius-small;
+                                            background: item.uri == root.now-uri ? Theme.primary.with-alpha(0.1) : (tile.has-hover ? Theme.text.with-alpha(0.08) : transparent);
+                                            accessible-role: button;
+                                            accessible-label: item.title + ", " + item.subtitle;
+                                            HorizontalLayout {
+                                                padding: 4px;
+                                                spacing: 16px;
+                                                Art { width: 58px; height: 58px; img: item.image; has-img: item.has-image; }
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    spacing: 3px;
+                                                    TitleLine { title: item.title; explicit: item.explicit; current: item.uri == root.now-uri; size: Theme.font-size * 1.2; }
+                                                    Text { text: item.subtitle; color: Theme.text-muted; overflow: elide; }
+                                                }
+                                            }
+                                            tile := TouchArea { mouse-cursor: pointer; clicked => { root.play-track(0, i); } }
+                                        }
+                                    }
+
+                                    // playlist row: as many cards as fit, arrows slide by one
+                                    if root.playlists.length > 0: HorizontalLayout {
+                                        height: 40px;
+                                        spacing: 10px;
+                                        SectionTitle { vertical-alignment: center; horizontal-stretch: 1; text: L.t("Le tue playlist", "Your playlists"); }
+                                        PagerButton {
+                                            // Hidden, not removed: removing it would feed the width back into the count.
+                                            visible: root.playlists.length > cards.fit;
+                                            icon: @image-url("icons/chevron-left.svg");
+                                            label: L.t("Precedenti", "Previous");
+                                            enabled: root.card-offset > 0;
+                                            clicked => { root.card-offset = Math.max(0, root.card-offset - 1); }
+                                        }
+                                        PagerButton {
+                                            // Hidden, not removed: removing it would feed the width back into the count.
+                                            visible: root.playlists.length > cards.fit;
+                                            icon: @image-url("icons/chevron-right.svg");
+                                            label: L.t("Successive", "Next");
+                                            enabled: root.card-offset + cards.fit < root.playlists.length;
+                                            clicked => { root.card-offset += 1; }
+                                        }
+                                    }
+                                    cards := Rectangle {
+                                        property <int> fit: Math.max(2, Math.floor((self.width + 14px) / 234px));
+                                        property <length> card-w: (self.width - (self.fit - 1) * 14px) / self.fit;
+                                        height: root.playlists.length > 0 ? 176px : 0px;
+                                        for card[i] in root.playlists: Card {
+                                            property <int> rel: i - root.card-offset;
+                                            visible: self.rel >= 0 && self.rel < parent.fit;
+                                            x: Math.max(self.rel, 0) * (parent.card-w + 14px);
+                                            width: parent.card-w;
+                                            height: parent.height;
+                                            item: card;
+                                            clicked => { root.open-item(0, i); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ===== search =====
+                        if root.page == 1: ScrollView {
+                            mouse-drag-pan-enabled: false;
+                            horizontal-scrollbar-policy: always-off;
+                            content-width: self.visible-width;
+                            content-height: search.preferred-height;
+                            search := VerticalLayout {
+                                padding-left: root.page-x;
+                                padding-right: root.page-x;
+                                padding-bottom: 16px;
+                                spacing: 12px;
+                                alignment: start;
+                                SectionTitle { text: L.t("Cerca", "Search"); }
+                                Rectangle {
+                                    height: 46px;
+                                    border-radius: 23px;
+                                    background: Theme.surface;
+                                    border-width: 1px;
+                                    border-color: input.has-focus ? Theme.primary : Theme.border;
+                                    HorizontalLayout {
+                                        padding-left: 18px;
+                                        padding-right: 18px;
+                                        spacing: 10px;
+                                        VerticalLayout { alignment: center; Image { source: @image-url("icons/search.svg"); width: 20px; height: 20px; colorize: Theme.text-muted; } }
+                                        Rectangle {
+                                            horizontal-stretch: 1;
+                                            if input.text == "": Text { x: 0; text: L.t("Brani, album o playlist", "Songs, albums or playlists"); color: Theme.text-muted; vertical-alignment: center; }
+                                            input := TextInput {
+                                                text <=> root.search-text;
+                                                color: Theme.text;
+                                                selection-background-color: Theme.primary.with-alpha(0.4);
+                                                font-size: Theme.font-size * 1.1;
+                                                vertical-alignment: center;
+                                                single-line: true;
+                                                accessible-label: L.t("Cerca brani, album o playlist", "Search songs, albums or playlists");
+                                                init => { self.focus(); }
+                                                accepted => { root.search-submit(self.text); }
+                                                edited => { root.search-edited(self.text); }
+                                            }
+                                        }
+                                    }
+                                }
+                                if root.search-state.kind == 1: VerticalLayout { for i in 6: SkeletonRow { } }
+                                if root.search-state.kind >= 2: StateView {
+                                    min-height: 280px;
+                                    state: root.search-state;
+                                    icon: @image-url("icons/search.svg");
+                                    acted => { root.search-submit(root.search-text); }
+                                }
+                                if root.search-state.kind == 2 && root.search-text == "" && root.recent-searches.length > 0: VerticalLayout {
+                                    spacing: 10px;
+                                    SubTitle { text: L.t("Ricerche recenti", "Recent searches"); }
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        alignment: start;
+                                        for query in root.recent-searches: Button {
+                                            ghost: true;
+                                            label: query;
+                                            clicked => {
+                                                root.search-text = query;
+                                                root.search-submit(query);
+                                            }
+                                        }
+                                    }
+                                }
+                                if root.search-state.kind == 0 && root.results-tracks.length > 0: SubTitle { text: L.t("Brani", "Songs"); }
+                                if root.search-state.kind == 0: VerticalLayout {
+                                    for item[i] in root.results-tracks: TrackRow {
+                                        item: item;
+                                        index: i;
+                                        current: item.uri == root.now-uri;
+                                        playing: root.playing;
+                                        play => { root.play-track(1, i); }
+                                        like => { root.like-item(1, i); }
+                                        enqueue => { root.enqueue-item(1, i); }
+                                    }
+                                }
+                                if root.search-state.kind == 0 && root.results-albums.length > 0: SubTitle { text: "Album"; }
+                                if root.search-state.kind == 0 && root.results-albums.length > 0: Rectangle {
+                                    property <int> fit: Math.max(2, Math.floor((self.width + 14px) / 200px));
+                                    height: 160px;
+                                    for card[i] in root.results-albums: Card {
+                                        visible: i < parent.fit;
+                                        width: (parent.width - (parent.fit - 1) * 14px) / parent.fit;
+                                        x: i * (self.width + 14px);
+                                        height: parent.height;
+                                        item: card;
+                                        clicked => { root.open-item(1, i); }
+                                    }
+                                }
+                                if root.search-state.kind == 0 && root.results-playlists.length > 0: SubTitle { text: L.t("Playlist", "Playlists"); }
+                                if root.search-state.kind == 0 && root.results-playlists.length > 0: Rectangle {
+                                    property <int> fit: Math.max(2, Math.floor((self.width + 14px) / 200px));
+                                    height: 160px;
+                                    for card[i] in root.results-playlists: Card {
+                                        visible: i < parent.fit;
+                                        width: (parent.width - (parent.fit - 1) * 14px) / parent.fit;
+                                        x: i * (self.width + 14px);
+                                        height: parent.height;
+                                        item: card;
+                                        clicked => { root.open-item(2, i); }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ===== playlists =====
+                        if root.page == 2: ScrollView {
+                            property <int> columns: Math.max(2, Math.floor((self.visible-width - root.page-x * 2 + 14px) / 234px));
+                            property <length> card-w: (self.visible-width - root.page-x * 2 - (self.columns - 1) * 14px) / self.columns;
+                            mouse-drag-pan-enabled: false;
+                            horizontal-scrollbar-policy: always-off;
+                            content-width: self.visible-width;
+                            property <length> top: root.import-open ? 52px + 176px : 52px;
+                            content-height: self.top + 4px + Math.ceil(root.playlists.length / self.columns) * 190px + 16px;
+                            SectionTitle { x: root.page-x; y: 0px; text: L.t("Playlist", "Playlists"); }
+                            Button {
+                                width: self.min-width;
+                                x: parent.visible-width - root.page-x - self.width;
+                                y: 2px;
+                                ghost: root.import-open;
+                                label: root.import-open ? L.t("Chiudi", "Close") : L.t("Importa playlist", "Import playlist");
+                                clicked => { root.import-open = !root.import-open; }
+                            }
+                            if root.import-open: Rectangle {
+                                x: root.page-x;
+                                y: 52px;
+                                width: parent.visible-width - root.page-x * 2;
+                                height: 160px;
+                                background: Theme.surface;
+                                border-radius: Theme.radius-large;
+                                border-width: 1px;
+                                border-color: Theme.border;
+                                import-panel := VerticalLayout {
+                                    padding: 20px;
+                                    spacing: 12px;
+                                    HorizontalLayout {
+                                        spacing: 14px;
+                                        alignment: start;
+                                        Text { text: L.t("Da", "From"); color: Theme.text; width: 40px; vertical-alignment: center; }
+                                        SegmentedToggle {
+                                            options: ["Spotify", "YouTube"];
+                                            segment-width: 96px;
+                                            selected: root.import-source;
+                                            chosen(i) => { root.import-source = i; }
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 12px;
+                                        Rectangle {
+                                            height: 38px;
+                                            horizontal-stretch: 1;
+                                            border-radius: Theme.radius-small;
+                                            background: Theme.text.with-alpha(0.06);
+                                            border-width: 1px;
+                                            border-color: link-input.has-focus ? Theme.primary : Theme.border;
+                                            animate border-color { duration: Motion.quick; }
+                                            if link-input.text == "": Text {
+                                                x: 12px;
+                                                text: root.import-source == 0 ? "https://open.spotify.com/playlist/…" : "https://www.youtube.com/playlist?list=…";
+                                                color: Theme.text-muted;
+                                                vertical-alignment: center;
+                                            }
+                                            link-input := TextInput {
+                                                x: 12px;
+                                                width: parent.width - 24px;
+                                                text <=> root.import-url;
+                                                color: Theme.text;
+                                                selection-background-color: Theme.primary.with-alpha(0.4);
+                                                vertical-alignment: center;
+                                                single-line: true;
+                                                accessible-label: L.t("Link della playlist", "Playlist link");
+                                                accepted => { root.import-playlist(root.import-source, self.text); }
+                                            }
+                                        }
+                                        Button {
+                                            enabled: !root.import-busy;
+                                            label: root.import-busy ? L.t("Importo…", "Importing…") : L.t("Importa", "Import");
+                                            clicked => { root.import-playlist(root.import-source, root.import-url); }
+                                        }
+                                    }
+                                    Text {
+                                        text: root.import-source == 0
+                                            ? L.t("Playlist o album pubblici, fino a 100 brani.", "Public playlists or albums, up to 100 songs.")
+                                            : L.t("Playlist pubbliche o non in elenco.", "Public or unlisted playlists.");
+                                        color: Theme.text-muted;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+                            for card[i] in root.playlists: Card {
+                                x: root.page-x + Math.mod(i, parent.columns) * (parent.card-w + 14px);
+                                y: parent.top + Math.floor(i / parent.columns) * 190px;
+                                width: parent.card-w;
+                                height: 176px;
+                                item: card;
+                                clicked => { root.open-item(0, i); }
+                            }
+                        }
+
+                        // ===== history =====
+                        if root.page == 3: VerticalLayout {
+                            padding-left: root.page-x;
+                            padding-right: root.page-x;
+                            padding-bottom: 8px;
+                            spacing: 8px;
+                            SectionTitle { text: L.t("Cronologia", "History"); }
+                            if root.history-state.kind == 1: VerticalLayout { alignment: start; vertical-stretch: 1; for i in 8: SkeletonRow { } }
+                            if root.history-state.kind >= 2: StateView {
+                                vertical-stretch: 1;
+                                state: root.history-state;
+                                icon: @image-url("icons/history.svg");
+                                acted => { root.refresh(3); }
+                            }
+                            if root.history-state.kind == 0: ListView {
+                                for item[i] in root.history: TrackRow {
+                                    item: item;
+                                    index: i;
+                                    current: item.uri == root.now-uri;
+                                    playing: root.playing;
+                                    play => { root.play-track(3, i); }
+                                    like => { root.like-item(3, i); }
+                                    enqueue => { root.enqueue-item(3, i); }
+                                }
+                            }
+                        }
+
+                        // ===== settings / theme editor =====
+                        if root.page == 4: ScrollView {
+                            // Wheel-only scrolling: dragging the colour wheel or a slider must not move the page.
+                            mouse-drag-pan-enabled: false;
+                            horizontal-scrollbar-policy: always-off;
+                            content-width: self.visible-width;
+                            content-height: settings.preferred-height;
+                            settings := VerticalLayout {
+                                padding-left: root.page-x;
+                                padding-right: root.page-x;
+                                padding-bottom: 16px;
+                                spacing: 12px;
+                                alignment: start;
+                                SectionTitle { text: L.t("Impostazioni", "Settings"); }
+
+                                // --- language and motion ---
+                                Rectangle {
+                                    background: Theme.surface;
+                                    border-radius: Theme.radius-large;
+                                    border-width: 1px;
+                                    border-color: Theme.border;
+                                    height: general.preferred-height;
+                                    general := VerticalLayout {
+                                        padding: 20px;
+                                        spacing: 12px;
+                                        SubTitle { text: L.t("Generali", "General"); }
+                                        HorizontalLayout {
+                                            spacing: 14px;
+                                            alignment: start;
+                                            Text { text: L.t("Lingua", "Language"); color: Theme.text; width: 180px; vertical-alignment: center; }
+                                            SegmentedToggle {
+                                                options: ["IT", "EN"];
+                                                selected: L.english ? 1 : 0;
+                                                chosen(i) => {
+                                                    if (L.english != (i == 1)) {
+                                                        L.english = i == 1;
+                                                        root.language-changed(L.english);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        SettingSwitch {
+                                            label: L.t("Animazioni", "Animations");
+                                            on: Motion.on;
+                                            toggled => {
+                                                Motion.on = !Motion.on;
+                                                root.animations-changed(Motion.on);
+                                            }
+                                        }
+                                        Disclosure { label: L.t("Scorciatoie da tastiera", "Keyboard shortcuts"); text-size: Theme.font-size; open <=> root.shortcuts-open; }
+                                        if root.shortcuts-open: VerticalLayout {
+                                            spacing: 8px;
+                                            StatRow { label: L.t("Spazio", "Space"); value: L.t("Riproduci o metti in pausa", "Play or pause"); }
+                                            StatRow { label: "← →"; value: L.t("Indietro o avanti di 5 secondi", "Back or forward 5 seconds"); }
+                                            StatRow { label: "↑ ↓"; value: L.t("Volume", "Volume"); }
+                                            StatRow { label: "Ctrl+← Ctrl+→"; value: L.t("Brano precedente o successivo", "Previous or next song"); }
+                                            StatRow { label: "Ctrl+M"; value: L.t("Disattiva o riattiva l'audio", "Mute or unmute"); }
+                                            StatRow { label: "Ctrl+L"; value: L.t("Testo", "Lyrics"); }
+                                            StatRow { label: "Ctrl+Q"; value: L.t("Coda di riproduzione", "Queue"); }
+                                            StatRow { label: "Ctrl+F"; value: L.t("Cerca", "Search"); }
+                                            StatRow { label: "F11"; value: L.t("Vista immersiva", "Immersive view"); }
+                                            StatRow { label: "Esc"; value: L.t("Chiude la vista immersiva o la coda", "Closes the immersive view or the queue"); }
+                                        }
+                                    }
+                                }
+
+                                // --- appearance ---
+                                Rectangle {
+                                    background: Theme.surface;
+                                    border-radius: Theme.radius-large;
+                                    border-width: 1px;
+                                    border-color: Theme.border;
+                                    height: appearance.preferred-height;
+                                    appearance := VerticalLayout {
+                                        padding: 20px;
+                                        spacing: 10px;
+                                        SubTitle { text: L.t("Aspetto", "Appearance"); }
+                                        SettingChips {
+                                            label: L.t("Sfondo della finestra", "Window background");
+                                            options: ["Trasparente", "Sfocato", "Acrilico", "Mica"];
+                                            selected: root.material-index;
+                                            chosen(i) => { root.set-material(i); }
+                                        }
+                                        SettingSlider { label: L.t("Opacità della finestra", "Window opacity"); value: root.window-opacity; changed(v) => { root.window-opacity-edited(v); } }
+                                        SettingSlider { label: L.t("Arrotondamento angoli", "Corner rounding"); value: root.radius-value; value-text: Math.round(Theme.radius-large / 1px) + " px"; changed(v) => { root.radius-edited(v); } }
+                                        SettingSlider { label: L.t("Dimensione del testo", "Text size"); value: root.text-size-value; value-text: Math.round(Theme.font-size / 1px) + " px"; changed(v) => { root.text-size-edited(v); } }
+                                        Text { text: L.t("L'intensità della sfocatura la decide Windows: qui scegli il tipo di sfondo e quanto colore lo copre.", "Windows decides how strong the blur is: here you pick the background type and how much color covers it."); color: Theme.text-muted; wrap: word-wrap; }
+                                    }
+                                }
+
+                                // --- colours: list on the left, editor always beside it ---
+                                Rectangle {
+                                    background: Theme.surface;
+                                    border-radius: Theme.radius-large;
+                                    border-width: 1px;
+                                    border-color: Theme.border;
+                                    height: colours.preferred-height;
+                                    colours := VerticalLayout {
+                                        padding: 20px;
+                                        spacing: 12px;
+                                        SubTitle { text: L.t("Colori", "Colors"); }
+                                        HorizontalLayout {
+                                            spacing: 10px;
+                                            alignment: start;
+                                            Text { text: L.t("Accento", "Accent"); color: Theme.text; width: 80px; vertical-alignment: center; }
+                                            for c in [#b2b9ff, #4ca8ff, #1db954, #ff5c8a, #f5a524, #a78bfa, #22d3ee, #e5e7eb]: Rectangle {
+                                                width: 30px;
+                                                height: 30px;
+                                                border-radius: 15px;
+                                                background: c;
+                                                border-width: Theme.primary == c ? 3px : 1px;
+                                                border-color: Theme.primary == c ? Theme.text : Theme.border;
+                                                accessible-role: button;
+                                                accessible-label: L.t("Colore d'accento", "Accent color");
+                                                TouchArea { mouse-cursor: pointer; clicked => { root.preset-accent(c); } }
+                                            }
+                                        }
+                                        Disclosure { label: L.t("Personalizza tutti i colori", "Customize every color"); text-size: Theme.font-size; open <=> root.colors-open; }
+                                        if root.colors-open: VerticalLayout {
+                                            spacing: 12px;
+                                            HorizontalLayout {
+                                                spacing: 24px;
+                                                VerticalLayout {
+                                                    width: 230px;
+                                                    spacing: 2px;
+                                                    alignment: start;
+                                                    for token[i] in root.theme-colors: Rectangle {
+                                                        height: 36px;
+                                                        border-radius: Theme.radius-small;
+                                                        background: root.edit-index == i ? Theme.text.with-alpha(0.1) : (token-row.has-hover ? Theme.text.with-alpha(0.05) : transparent);
+                                                        accessible-role: button;
+                                                        accessible-label: token.label;
+                                                        token-row := TouchArea { mouse-cursor: pointer; clicked => { root.select-color(i); } }
+                                                        HorizontalLayout {
+                                                            padding-left: 8px;
+                                                            padding-right: 8px;
+                                                            spacing: 12px;
+                                                            VerticalLayout {
+                                                                alignment: center;
+                                                                Rectangle { width: 24px; height: 24px; border-radius: 6px; background: token.color; border-width: 1px; border-color: Theme.border; }
+                                                            }
+                                                            Text { text: token.label; color: Theme.text; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                                                        }
+                                                    }
+                                                }
+                                                VerticalLayout {
+                                                    horizontal-stretch: 1;
+                                                    spacing: 12px;
+                                                    alignment: start;
+                                                    SubTitle { text: root.theme-colors.length > 0 ? root.theme-colors[root.edit-index].label : ""; overflow: elide; }
+                                                    HorizontalLayout {
+                                                        spacing: 24px;
+                                                        ColorWheel {
+                                                            wheel: root.color-wheel;
+                                                            hue: root.edit-h;
+                                                            saturation: root.edit-s;
+                                                            brightness: root.edit-v;
+                                                            picked(h, s) => {
+                                                                root.edit-h = h;
+                                                                root.edit-s = s;
+                                                                root.hsv-edited(root.edit-index, root.edit-h, root.edit-s, root.edit-v, root.edit-a);
+                                                            }
+                                                        }
+                                                        VerticalLayout {
+                                                            horizontal-stretch: 1;
+                                                            min-width: 220px;
+                                                            alignment: center;
+                                                            spacing: 10px;
+                                                            HorizontalLayout {
+                                                                spacing: 12px;
+                                                                Rectangle {
+                                                                    width: 44px;
+                                                                    height: 44px;
+                                                                    border-radius: Theme.radius-medium;
+                                                                    border-width: 1px;
+                                                                    border-color: Theme.border;
+                                                                    background: root.theme-colors.length > 0 ? root.theme-colors[root.edit-index].color : transparent;
+                                                                }
+                                                                VerticalLayout {
+                                                                    alignment: center;
+                                                                    spacing: 4px;
+                                                                    Text { text: L.t("Codice HEX (Invio per applicare)", "HEX code (Enter to apply)"); color: Theme.text-muted; overflow: elide; }
+                                                                    Rectangle {
+                                                                        height: 32px;
+                                                                        border-radius: Theme.radius-small;
+                                                                        background: Theme.text.with-alpha(0.06);
+                                                                        border-width: 1px;
+                                                                        border-color: hex.has-focus ? Theme.primary : Theme.border;
+                                                                        hex := TextInput {
+                                                                            x: 10px;
+                                                                            width: parent.width - 20px;
+                                                                            text: root.theme-colors.length > 0 ? root.theme-colors[root.edit-index].hex : "";
+                                                                            color: Theme.text;
+                                                                            selection-background-color: Theme.primary.with-alpha(0.4);
+                                                                            vertical-alignment: center;
+                                                                            single-line: true;
+                                                                            accessible-label: L.t("Codice HEX", "HEX code");
+                                                                            accepted => { root.hex-entered(root.edit-index, self.text); }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            SettingSlider {
+                                                                label: L.t("Luminosità", "Brightness");
+                                                                label-width: 80px;
+                                                                value: root.edit-v;
+                                                                changed(v) => { root.edit-v = v; root.hsv-edited(root.edit-index, root.edit-h, root.edit-s, root.edit-v, root.edit-a); }
+                                                            }
+                                                            SettingSlider {
+                                                                label: L.t("Opacità", "Opacity");
+                                                                label-width: 80px;
+                                                                value: root.edit-a;
+                                                                changed(v) => { root.edit-a = v; root.hsv-edited(root.edit-index, root.edit-h, root.edit-s, root.edit-v, root.edit-a); }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            HorizontalLayout {
+                                                spacing: 10px;
+                                                Rectangle {
+                                                    height: 38px;
+                                                    horizontal-stretch: 1;
+                                                    max-width: 320px;
+                                                    border-radius: Theme.radius-small;
+                                                    background: Theme.text.with-alpha(0.06);
+                                                    border-width: 1px;
+                                                    border-color: name-input.has-focus ? Theme.primary : Theme.border;
+                                                    animate border-color { duration: Motion.quick; }
+                                                    if name-input.text == "": Text {
+                                                        x: 10px;
+                                                        text: L.t("Nome del tema", "Theme name");
+                                                        color: Theme.text-muted;
+                                                        vertical-alignment: center;
+                                                    }
+                                                    name-input := TextInput {
+                                                        x: 10px;
+                                                        width: parent.width - 20px;
+                                                        text <=> root.theme-name;
+                                                        color: Theme.text;
+                                                        selection-background-color: Theme.primary.with-alpha(0.4);
+                                                        vertical-alignment: center;
+                                                        single-line: true;
+                                                        accessible-label: L.t("Nome del tema", "Theme name");
+                                                        accepted => { root.save-theme(self.text); }
+                                                    }
+                                                }
+                                                Button { label: L.t("Salva tema", "Save theme"); enabled: root.theme-name != ""; clicked => { root.save-theme(root.theme-name); } }
+                                                Rectangle { horizontal-stretch: 1; }
+                                            }
+                                            if root.saved-themes.length > 0: VerticalLayout {
+                                                spacing: 4px;
+                                                Text { text: L.t("I tuoi temi", "Your themes"); color: Theme.text-muted; font-weight: 600; }
+                                                for name in root.saved-themes: HorizontalLayout {
+                                                    spacing: 10px;
+                                                    height: 38px;
+                                                    Text { text: name; color: Theme.text; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        Button { ghost: true; height: 32px; label: L.t("Applica", "Apply"); clicked => { root.apply-theme(name); } }
+                                                    }
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        Button { ghost: true; danger: true; height: 32px; label: L.t("Elimina", "Delete"); clicked => { root.delete-theme(name); } }
+                                                    }
+                                                }
+                                            }
+                                            HorizontalLayout {
+                                                spacing: 10px;
+                                                alignment: start;
+                                                Button { ghost: true; label: L.t("Ripristina predefinito", "Restore default"); clicked => { root.reset-theme(); } }
+                                                Button { ghost: true; label: L.t("Importa tema", "Import theme"); clicked => { root.import-theme(); } }
+                                                Button { ghost: true; label: L.t("Apri cartella temi", "Open themes folder"); clicked => { root.open-themes-folder(); } }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // --- advanced: Spotify account and playback engines ---
+                                Disclosure { label: L.t("Avanzate", "Advanced"); open <=> root.advanced-open; }
+                                if root.advanced-open: Rectangle {
+                                    background: Theme.surface;
+                                    border-radius: Theme.radius-large;
+                                    border-width: 1px;
+                                    border-color: Theme.border;
+                                    height: account.preferred-height;
+                                    account := VerticalLayout {
+                                        padding: 20px;
+                                        spacing: 10px;
+                                        SubTitle { text: L.t("Account Spotify", "Spotify account"); }
+                                        SpotifySetup {
+                                            client-id: root.client-id;
+                                            redirect-uri: root.redirect-uri;
+                                            logged-in: root.logged-in;
+                                            save(id) => { root.client-id-entered(id); }
+                                            login => { root.login(); }
+                                            logout => { root.logout(); }
+                                            open-dashboard => { root.open-spotify-dashboard(); }
+                                        }
+                                    }
+                                }
+                                if root.advanced-open: Rectangle {
+                                    background: Theme.surface;
+                                    border-radius: Theme.radius-large;
+                                    border-width: 1px;
+                                    border-color: Theme.border;
+                                    height: playback.preferred-height;
+                                    playback := VerticalLayout {
+                                        padding: 20px;
+                                        spacing: 12px;
+                                        SubTitle { text: L.t("Riproduzione", "Playback"); }
+                                        SettingChips {
+                                            label: L.t("Motore", "Engine");
+                                            options: ["Spotify", "YouTube", "librespot"];
+                                            selected: root.engine-index;
+                                            chosen(i) => {
+                                                root.engine-index = i;
+                                                root.engine-changed(i);
+                                            }
+                                        }
+                                        Text {
+                                            text: root.engine-index == 0
+                                                ? L.t("Il player ufficiale. Serve l'account Spotify collegato.", "The official player. Needs your Spotify account connected.")
+                                                : (root.engine-index == 1
+                                                    ? L.t("Cerca e riproduce i brani da YouTube.", "Finds and plays songs from YouTube.")
+                                                    : L.t("Sperimentale: su alcuni account non suona.", "Experimental: it doesn't play on some accounts."));
+                                            color: Theme.text-muted;
+                                            wrap: word-wrap;
+                                        }
+                                        if !root.ytdlp-found: HorizontalLayout {
+                                            spacing: 12px;
+                                            Text { text: root.ytdlp-status; color: Theme.danger; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; }
+                                            Button { ghost: true; height: 34px; label: L.t("Come installarlo", "How to install it"); clicked => { root.open-ytdlp-page(); } }
+                                        }
+                                        YouTubeAccount {
+                                            connected: root.youtube-connected;
+                                            connect => { root.connect-youtube(); }
+                                            disconnect => { root.disconnect-youtube(); }
+                                        }
+                                        Text { text: L.t("Con il tuo account YouTube eviti i blocchi «non sei un bot» e puoi ascoltare i video vietati ai minori.", "With your YouTube account you avoid the \"not a bot\" blocks and can play age-restricted videos."); color: Theme.text-muted; wrap: word-wrap; }
+                                        Disclosure { label: L.t("Dettagli", "Details"); text-size: Theme.font-size; open <=> root.playback-details-open; }
+                                        if root.playback-details-open: VerticalLayout {
+                                            spacing: 12px;
+                                            Text { text: L.t("Se un motore non funziona, l'app passa da sola a un altro e riprende il brano.", "If an engine fails, the app switches to another one and picks the song up again."); color: Theme.text-muted; wrap: word-wrap; }
+                                            Text { text: L.t("Account YouTube: l'accesso resta salvato solo su questo computer e le richieste arrivano a YouTube a nome del tuo account. «Scollega» lo cancella.", "YouTube account: the login stays only on this computer and requests reach YouTube on behalf of your account. \"Disconnect\" deletes it."); color: Theme.text-muted; wrap: word-wrap; }
+                                            HorizontalLayout {
+                                                spacing: 12px;
+                                                Text { text: root.ytdlp-status; color: Theme.text-muted; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; }
+                                                Button { ghost: true; height: 34px; label: L.t("Ricontrolla", "Check again"); clicked => { root.check-ytdlp(); } }
+                                            }
+                                            Rectangle { height: 1px; background: Theme.border; }
+                                            Text { text: L.t("Richieste a Spotify", "Spotify requests"); color: Theme.text; font-weight: 600; }
+                                            if root.usage-note != "": Text { text: root.usage-note; color: root.usage-playback-blocked ? Theme.danger : Theme.text-muted; wrap: word-wrap; }
+                                            StatRow { label: L.t("Ultimi 30 secondi", "Last 30 seconds"); value: root.usage-window; }
+                                            StatRow { label: L.t("Da quando è aperta l'app", "Since the app opened"); value: root.usage-total; }
+                                            StatRow { label: L.t("Più usata", "Most used"); value: root.usage-busiest; }
+                                        }
+                                    }
+                                }
+
+                            }
+                        }
+
+                        // ===== lyrics: cover and title on the left, words on the right =====
+                        if root.page == 6: lyrics-page := Rectangle {
+                            property <bool> split: root.has-track;
+                            property <length> side: self.split ? self.width * 0.42 : 0px;
+                            property <length> cover-size: Math.min(self.side - 64px, self.height - 170px);
+                            clip: true;
+                            // The cover, huge and faint, tints the whole page.
+                            if root.now-has-art: Image {
+                                width: parent.width;
+                                height: parent.height;
+                                source: root.now-art;
+                                image-fit: cover;
+                                opacity: 0;
+                                init => { self.opacity = 0.07; }
+                                animate opacity { duration: Motion.slow; easing: ease-out; }
+                            }
+                            if lyrics-page.split: Rectangle {
+                                x: 0;
+                                width: lyrics-page.side;
+                                height: parent.height;
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 6px;
+                                    padding-left: 32px;
+                                    padding-right: 32px;
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        Art {
+                                            width: lyrics-page.cover-size;
+                                            height: lyrics-page.cover-size;
+                                            img: root.now-art;
+                                            has-img: root.now-has-art;
+                                            border-radius: Theme.radius-large;
+                                        }
+                                    }
+                                    Rectangle { height: 14px; }
+                                    Text { text: root.track-title; color: Theme.text; font-size: Theme.font-size * 1.5; font-weight: 600; horizontal-alignment: center; overflow: elide; }
+                                    Text { text: root.track-artist; color: Theme.text-muted; horizontal-alignment: center; overflow: elide; }
+                                }
+                            }
+                            Rectangle {
+                                x: lyrics-page.side;
+                                width: parent.width - lyrics-page.side;
+                                height: parent.height;
+                                if root.lyrics-state.kind == 1: VerticalLayout {
+                                    x: 8px;
+                                    y: parent.height * 0.25;
+                                    width: parent.width - 40px;
+                                    height: 300px;
+                                    alignment: start;
+                                    spacing: 26px;
+                                    for i in 6: Shimmer { height: 20px; max-width: 400px - i * 40px; }
+                                }
+                                if root.lyrics-state.kind >= 2: StateView {
+                                    state: root.lyrics-state;
+                                    icon: @image-url("icons/lyrics.svg");
+                                    acted => { root.refresh(6); }
+                                }
+                                if root.lyrics-state.kind == 0: lyrics-list := Flickable {
+                                    // Keeps the sung line a little above the middle. Set on each new line
+                                    // rather than bound: a click or a scroll would break a binding for good.
+                                    property <int> follow: root.lyrics-current;
+                                    function place() {
+                                        self.content-y = root.lyrics-current < 0 ? 0px : -Math.max(0px, root.lyrics-current * 70px - self.height * 0.36);
+                                    }
+                                    changed follow => { self.place(); }
+                                    init => { self.place(); }
+                                    content-height: root.lyrics.length * 70px + self.height;
+                                    animate content-y { duration: Motion.base; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+                                    for line[i] in root.lyrics: Rectangle {
+                                        property <bool> now: i == root.lyrics-current;
+                                        property <int> gap: Math.abs(i - root.lyrics-current);
+                                        property <bool> synced: root.lyrics-current >= 0;
+                                        y: i * 70px;
+                                        x: 8px;
+                                        width: parent.width - 40px;
+                                        height: 70px;
+                                        // Lines fade with distance from the one being sung.
+                                        opacity: self.synced ? Math.max(0.2, 1 - self.gap * 0.22) : 0.85;
+                                        animate opacity { duration: Motion.quick; }
+                                        Text {
+                                            x: 0;
+                                            width: Math.min(self.preferred-width, parent.width);
+                                            height: parent.height;
+                                            text: line.text;
+                                            // Karaoke: the sung part of the line lights up left to right.
+                                            color: parent.now
+                                                ? @linear-gradient(90deg, Theme.text 0, Theme.text root.lyrics-progress, Theme.text-muted.with-alpha(0.55) Math.min(1, root.lyrics-progress + 0.06), Theme.text-muted.with-alpha(0.55) 1)
+                                                : Theme.text-muted;
+                                            font-size: Theme.font-size * (parent.now ? 1.8 : 1.45);
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                            wrap: word-wrap;
+                                            animate font-size { duration: Motion.quick; easing: ease-out; }
+                                        }
+                                        TouchArea {
+                                            enabled: line.time-ms >= 0;
+                                            mouse-cursor: line.time-ms >= 0 ? MouseCursor.pointer : MouseCursor.default;
+                                            clicked => { root.seek-ms(line.time-ms); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ===== detail (playlist / album / liked songs) =====
+                        if root.page == 5: VerticalLayout {
+                            padding-left: root.page-x;
+                            padding-right: root.page-x;
+                            padding-bottom: 8px;
+                            spacing: 12px;
+                            HorizontalLayout {
+                                // Only as tall as its content: the track list takes the rest.
+                                vertical-stretch: 0;
+                                spacing: 20px;
+                                min-height: 140px;
+                                VerticalLayout { alignment: start; horizontal-stretch: 0; Art { width: 140px; height: 140px; img: root.detail-art; has-img: root.detail-has-art; liked-songs: root.detail-liked-songs; border-radius: Theme.radius-medium; } }
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    min-width: 260px;
+                                    preferred-width: 10000px;
+                                    alignment: end;
+                                    spacing: 6px;
+                                    // Long names wrap onto more lines instead of being cut.
+                                    Text { text: root.detail-title; color: Theme.text; font-size: Theme.font-size * 2.2; font-weight: 600; wrap: word-wrap; }
+                                    Text { text: root.detail-subtitle; color: Theme.text-muted; wrap: word-wrap; }
+                                    Rectangle { height: 4px; }
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        spacing: 10px;
+                                        Button { label: L.t("Riproduci", "Play"); enabled: root.detail-tracks.length > 0; clicked => { root.play-detail(); } }
+                                        // Quiet until it is about to act: then it turns red and asks.
+                                        if root.detail-local: Button {
+                                            ghost: true;
+                                            danger: root.confirm-remove;
+                                            label: root.confirm-remove ? L.t("Conferma rimozione", "Confirm removal") : L.t("Rimuovi playlist", "Remove playlist");
+                                            clicked => {
+                                                if (root.confirm-remove) {
+                                                    root.confirm-remove = false;
+                                                    root.remove-local-playlist();
+                                                } else {
+                                                    root.confirm-remove = true;
+                                                }
+                                            }
+                                        }
+                                        Timer {
+                                            interval: 4s;
+                                            running: root.confirm-remove;
+                                            triggered => { root.confirm-remove = false; }
+                                        }
+                                        if root.detail-source != "": VerticalLayout {
+                                            alignment: center;
+                                            Rectangle {
+                                                height: 26px;
+                                                width: source-text.preferred-width + 20px;
+                                                border-radius: 13px;
+                                                background: Theme.text.with-alpha(0.08);
+                                                source-text := Text { text: root.detail-source; color: Theme.text-muted; }
+                                            }
+                                        }
+                                    }
+                                    if root.detail-note != "": Text { text: root.detail-note; color: Theme.text-muted; wrap: word-wrap; }
+                                }
+                            }
+                            if root.detail-state.kind == 1: VerticalLayout { alignment: start; vertical-stretch: 1; for i in 7: SkeletonRow { } }
+                            if root.detail-state.kind >= 2: StateView {
+                                vertical-stretch: 1;
+                                state: root.detail-state;
+                                acted => { root.refresh(5); }
+                            }
+                            if root.detail-state.kind == 0: ListView {
+                                for item[i] in root.detail-tracks: TrackRow {
+                                    show-art: !root.detail-uniform-art;
+                                    item: item;
+                                    index: i;
+                                    current: item.uri == root.now-uri;
+                                    playing: root.playing;
+                                    play => { root.play-track(2, i); }
+                                    like => { root.like-item(2, i); }
+                                    enqueue => { root.enqueue-item(2, i); }
+                                }
+                            }
+                        }
+                        }
+                    }
+                }
+
+                // ---------- player bar ----------
+                Rectangle {
+                    height: root.immersive ? 0px : 94px;
+                    clip: true;
+                    animate height { duration: Motion.base; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+                    background: Theme.panel;
+
+                    Rectangle { y: 0; height: 1px; background: Theme.border; }
+
+                    HorizontalLayout {
+                        padding-left: 20px;
+                        padding-right: 20px;
+                        spacing: root.narrow ? 10px : 16px;
+
+                        VerticalLayout {
+                            alignment: center;
+                            // A small bounce whenever the song changes.
+                            Art {
+                                property <bool> bump: false;
+                                changed has-img => { self.bump = self.has-img; }
+                                width: 62px;
+                                height: 62px;
+                                img: root.now-art;
+                                has-img: root.now-has-art;
+                                zoom: self.bump ? 1 : 1.12;
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            HorizontalLayout {
+                                spacing: root.narrow ? 2px : 8px;
+                                VerticalLayout { alignment: center; IconButton { icon: @image-url("icons/shuffle.svg"); active: root.shuffle-on; enabled: root.has-track; label: root.shuffle-on ? L.t("Casuale attivo", "Shuffle on") : L.t("Casuale", "Shuffle"); clicked => { root.toggle-shuffle(); } } }
+                                VerticalLayout { alignment: center; IconButton { icon: @image-url("icons/prev.svg"); icon-size: 24px; enabled: root.has-track; label: L.t("Precedente", "Previous"); shortcut: "Ctrl+←"; clicked => { root.prev(); } } }
+                                IconButton {
+                                    width: 50px;
+                                    height: 50px;
+                                    border-radius: 25px;
+                                    background: Theme.text;
+                                    hover-color: Theme.text;
+                                    icon: root.track-loading ? @image-url("icons/refresh.svg") : (root.playing ? @image-url("icons/pause.svg") : @image-url("icons/play.svg"));
+                                    icon-size: root.track-loading ? 24px : 28px;
+                                    tint: Theme.panel.with-alpha(1.0);
+                                    // Turning while the song is on its way.
+                                    transform-rotation: root.track-loading && Motion.on ? Math.mod(animation-tick() / 3ms, 360) * 1deg : 0deg;
+                                    label: root.track-loading ? L.t("Avvio del brano…", "Starting the song…") : (root.playing ? L.t("Pausa", "Pause") : L.t("Riproduci", "Play"));
+                                    shortcut: L.t("Spazio", "Space");
+                                    clicked => { root.play-pause(); }
+                                }
+                                // A start that never answers must not leave the button turning forever.
+                                Timer {
+                                    interval: 30s;
+                                    running: root.track-loading;
+                                    triggered => { root.track-loading = false; }
+                                }
+                                VerticalLayout { alignment: center; IconButton { icon: @image-url("icons/next.svg"); icon-size: 24px; enabled: root.has-track; label: L.t("Successivo", "Next"); shortcut: "Ctrl+→"; clicked => { root.next(); } } }
+                                VerticalLayout {
+                                    alignment: center;
+                                    IconButton {
+                                        icon: root.repeat-mode == 2 ? @image-url("icons/repeat-one.svg") : @image-url("icons/repeat.svg");
+                                        active: root.repeat-mode > 0;
+                                        enabled: root.has-track;
+                                        label: root.repeat-mode == 0 ? L.t("Ripeti", "Repeat") : (root.repeat-mode == 1 ? L.t("Ripeti: tutti", "Repeat: all") : L.t("Ripeti: un brano", "Repeat: one song"));
+                                        clicked => { root.toggle-repeat(); }
+                                    }
+                                }
+                            }
+                        }
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            min-width: 160px;
+                            alignment: center;
+                            spacing: 2px;
+                            HorizontalLayout {
+                                spacing: 6px;
+                                alignment: start;
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 0px;
+                                    Text { text: root.has-track ? root.track-title : L.t("Nessun brano", "No song"); color: Theme.text; font-size: Theme.font-size * 1.1; font-weight: 600; overflow: elide; }
+                                    Text { text: root.track-loading ? L.t("Avvio del brano…", "Starting the song…") : (root.has-track ? root.track-artist : L.t("Scegli qualcosa da ascoltare", "Pick something to play")); color: Theme.text-muted; overflow: elide; }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    IconButton {
+                                        icon: @image-url("icons/heart.svg");
+                                        active-icon: @image-url("icons/heart-filled.svg");
+                                        icon-size: 20px;
+                                        active: root.now-liked;
+                                        enabled: root.has-track;
+                                        width: 30px;
+                                        height: 30px;
+                                        label: root.now-liked ? L.t("Togli dai preferiti", "Remove from favorites") : L.t("Aggiungi ai preferiti", "Add to favorites");
+                                        clicked => { root.like-current(); }
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Text { text: root.position-text; color: Theme.text-muted; vertical-alignment: center; min-width: 30px; }
+                                SeekBar {
+                                    horizontal-stretch: 1;
+                                    label: L.t("Posizione nel brano", "Song position");
+                                    enabled: root.duration-ms > 0;
+                                    value: root.duration-ms > 0 ? root.position-ms / root.duration-ms : 0;
+                                    seeked(v) => { root.seek(v); }
+                                }
+                                Text { text: root.duration-text; color: Theme.text-muted; vertical-alignment: center; min-width: 30px; }
+                            }
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            HorizontalLayout {
+                                spacing: 4px;
+                                IconButton { icon: @image-url("icons/lyrics.svg"); active: root.page == 6; label: L.t("Testo", "Lyrics"); shortcut: "Ctrl+L"; clicked => { root.toggle-lyrics(); } }
+                                IconButton { icon: @image-url("icons/queue.svg"); active: root.queue-open; label: L.t("Coda di riproduzione", "Queue"); shortcut: "Ctrl+Q"; clicked => { root.toggle-queue(); } }
+                                Rectangle { width: 4px; }
+                                IconButton {
+                                    icon: root.muted ? @image-url("icons/volume-mute.svg") : @image-url("icons/volume.svg");
+                                    icon-size: 22px;
+                                    active: root.muted;
+                                    label: root.muted ? L.t("Riattiva l'audio", "Unmute") : L.t("Disattiva l'audio", "Mute");
+                                    shortcut: "Ctrl+M";
+                                    clicked => { root.toggle-mute(); }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    SeekBar {
+                                        width: root.narrow ? 72px : 96px;
+                                        knob: true;
+                                        label: "Volume";
+                                        value: root.shown-volume;
+                                        changed(v) => { root.volume-to(v, true); }
+                                        seeked(v) => { root.volume-to(v, false); }
+                                    }
+                                }
+                                Rectangle { width: 4px; }
+                                IconButton { icon: @image-url("icons/fullscreen.svg"); label: L.t("Vista immersiva", "Immersive view"); shortcut: "F11"; clicked => { root.toggle-immersive(); } }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---------- immersive view: a strip to move the window, and the way back ----------
+        if root.immersive: TouchArea {
+            y: 0;
+            height: 36px;
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                    root.drag-window();
+                }
+            }
+            double-clicked => { root.toggle-maximize(); }
+        }
+        if root.immersive: IconButton {
+            x: root.width - self.width - 20px;
+            y: root.height - self.height - 29px;
+            icon: @image-url("icons/close.svg");
+            label: L.t("Esci dalla vista immersiva", "Exit immersive view");
+            shortcut: "Esc";
+            clicked => { root.toggle-immersive(); }
+        }
+        if root.immersive: IconButton {
+            x: root.width - self.width - 14px;
+            y: 12px;
+            icon: root.os-fullscreen ? @image-url("icons/fullscreen-exit.svg") : @image-url("icons/fullscreen.svg");
+            icon-size: 18px;
+            label: root.os-fullscreen ? L.t("Esci dallo schermo intero", "Exit full screen") : L.t("Schermo intero", "Full screen");
+            clicked => {
+                root.os-fullscreen = !root.os-fullscreen;
+                root.set-fullscreen(root.os-fullscreen);
+            }
+        }
+
+        // ---------- queue: slides in over the page ----------
+        QueuePanel {
+            x: root.queue-open ? root.width - self.width - 8px : root.width + 30px;
+            animate x { duration: Motion.base; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+            y: 58px;
+            width: root.queue-width;
+            height: root.height - 58px - 94px - 8px;
+            visible: root.queue-open || self.x < root.width;
+            border-radius: Theme.radius-large;
+            border-width: 1px;
+            border-color: Theme.border;
+            background: Theme.window-tint.with-alpha(1.0).darker(0.25);
+            drop-shadow-blur: 24px;
+            drop-shadow-offset-x: -2px;
+            drop-shadow-offset-y: 8px;
+            drop-shadow-color: #00000060;
+            items: root.queue-items;
+            state: root.queue-state;
+            now-uri: root.now-uri;
+            playing: root.playing;
+            play(i) => { root.play-track(4, i); }
+            like(i) => { root.like-item(4, i); }
+            close => { root.toggle-queue(); }
+        }
+
+        // ---------- toast: rises above the player, sinks back when done ----------
+        Rectangle {
+            property <string> last-text;
+            property <string> last-action;
+            property <bool> open: root.toast != "";
+            // Kept after the toast clears, so it leaves with its words on.
+            property <string> message: root.toast;
+            changed message => {
+                if (self.message != "") {
+                    self.last-text = self.message;
+                    self.last-action = root.toast-action;
+                }
+            }
+            x: (root.width - self.width) / 2;
+            y: root.height - (root.immersive ? 0px : 94px) - self.height - (self.open ? 14px : -10px);
+            animate y { duration: Motion.base; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+            opacity: self.open ? 1 : 0;
+            animate opacity { duration: Motion.quick; }
+            visible: self.opacity > 0;
+            width: Math.min(toast-row.preferred-width, root.width - 80px);
+            height: 44px;
+            border-radius: 22px;
+            background: Theme.window-tint.with-alpha(1.0).darker(0.25);
+            border-width: 1px;
+            border-color: Theme.border;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: #00000050;
+            accessible-role: text;
+            accessible-label: self.last-text;
+            toast-row := HorizontalLayout {
+                in property <string> parent-text: parent.last-text;
+                in property <string> parent-action: parent.last-action;
+                padding-left: 20px;
+                padding-right: parent.last-action != "" ? 8px : 20px;
+                spacing: 12px;
+                Text { text: toast-row.parent-text; color: Theme.text; vertical-alignment: center; overflow: elide; }
+                if parent.last-action != "": VerticalLayout {
+                    alignment: center;
+                    Button { height: 30px; ghost: true; label: toast-row.parent-action; clicked => { root.toast-acted(); } }
+                }
+            }
+        }
+
+        // ---------- tooltip ----------
+        Rectangle {
+            property <length> w: tip-text.preferred-width + 20px;
+            x: Tip.beside ? Math.min(Tip.x, root.width - self.w - 6px) : Math.clamp(Tip.x - self.w / 2, 6px, root.width - self.w - 6px);
+            y: Tip.beside ? Tip.y - self.height / 2 : (Tip.above ? Tip.y - self.height - 6px : Tip.y + 6px);
+            width: self.w;
+            height: 28px;
+            border-radius: Theme.radius-small;
+            background: Theme.window-tint.with-alpha(1.0).darker(0.35);
+            border-width: 1px;
+            border-color: Theme.border;
+            opacity: Tip.text != "" ? 1 : 0;
+            visible: self.opacity > 0;
+            animate opacity { delay: 450ms; duration: Motion.quick; }
+            tip-text := Text { text: Tip.text; color: Theme.text; }
+        }
+
+        // ---------- first run: Spotify or YouTube ----------
+        if root.onboarding: Rectangle {
+            background: Theme.window-tint.with-alpha(1.0).darker(0.25);
+            TouchArea {
+                height: 48px;
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                        root.drag-window();
+                    }
+                }
+            }
+            HorizontalLayout {
+                x: parent.width - self.preferred-width - 8px;
+                y: 6px;
+                height: 36px;
+                IconButton { icon: @image-url("icons/minimize.svg"); icon-size: 16px; label: L.t("Riduci a icona", "Minimize"); clicked => { root.minimize(); } }
+                IconButton { icon: @image-url("icons/close.svg"); icon-size: 16px; label: L.t("Chiudi", "Close"); clicked => { root.close-app(); } }
+            }
+            Rectangle {
+                width: Math.min(600px, parent.width - 64px);
+                height: Math.min(onboard.preferred-height, parent.height - 96px);
+                onboard := VerticalLayout {
+                    spacing: 16px;
+                    alignment: center;
+                    HorizontalLayout { alignment: start; Image { source: @image-url("lume.png"); width: 56px; height: 56px; } }
+                    if root.onboarding-step == 0: VerticalLayout {
+                        spacing: 16px;
+                        SectionTitle { text: L.t("Benvenuto in Lume", "Welcome to Lume"); }
+                        Text { text: L.t("In che lingua vuoi usare l'app?", "Which language do you want to use?"); color: Theme.text-muted; wrap: word-wrap; }
+                        ChoiceCard {
+                            title: "Italiano";
+                            badge: "IT";
+                            text: "Menu, messaggi e testi dell'app in italiano.";
+                            clicked => {
+                                if (L.english) {
+                                    L.english = false;
+                                    root.language-changed(false);
+                                }
+                                root.onboarding-step = 1;
+                            }
+                        }
+                        ChoiceCard {
+                            title: "English";
+                            badge: "EN";
+                            text: "Menus, messages and app text in English.";
+                            clicked => {
+                                if (!L.english) {
+                                    L.english = true;
+                                    root.language-changed(true);
+                                }
+                                root.onboarding-step = 1;
+                            }
+                        }
+                        Text { text: L.t("Puoi cambiarla quando vuoi in Impostazioni › Generali.", "You can change it any time in Settings › General."); color: Theme.text-muted; wrap: word-wrap; }
+                    }
+                    if root.onboarding-step == 1: VerticalLayout {
+                        spacing: 16px;
+                        SectionTitle { text: L.t("Da dove vuoi ascoltare?", "Where do you want to listen from?"); }
+                        Text { text: L.t("Scegli da dove arriva la tua musica.", "Pick where your music comes from."); color: Theme.text-muted; wrap: word-wrap; }
+                        ChoiceCard {
+                            title: "Spotify";
+                            icon: @image-url("icons/playlists.svg");
+                            text: L.t("Il tuo account Premium e le tue playlist. Serve una tua app Spotify gratuita: ti guidiamo passo per passo.", "Your Premium account and your playlists. You need your own free Spotify app: we guide you step by step.");
+                            clicked => { root.onboarding-choose(0); }
+                        }
+                        ChoiceCard {
+                            title: "YouTube";
+                            icon: @image-url("icons/search.svg");
+                            text: L.t("Con il tuo account Google. Cerchi i brani e importi le playlist da Spotify o da YouTube. Serve yt-dlp.", "With your Google account. Search for songs and import playlists from Spotify or YouTube. Needs yt-dlp.");
+                            clicked => { root.onboarding-choose(1); }
+                        }
+                        Text { text: L.t("Puoi cambiare idea quando vuoi in Impostazioni › Avanzate.", "You can change your mind any time in Settings › Advanced."); color: Theme.text-muted; wrap: word-wrap; }
+                        HorizontalLayout {
+                            alignment: start;
+                            Button { ghost: true; label: L.t("Indietro", "Back"); clicked => { root.onboarding-step = 0; } }
+                        }
+                    }
+                    if root.onboarding-step == 2: VerticalLayout {
+                        spacing: 16px;
+                        SectionTitle { text: L.t("Collega Spotify", "Connect Spotify"); }
+                        SpotifySetup {
+                            client-id: root.client-id;
+                            redirect-uri: root.redirect-uri;
+                            logged-in: root.logged-in;
+                            save(id) => { root.client-id-entered(id); }
+                            login => { root.login(); }
+                            logout => { root.logout(); }
+                            open-dashboard => { root.open-spotify-dashboard(); }
+                        }
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 10px;
+                            Button { ghost: true; label: L.t("Indietro", "Back"); clicked => { root.onboarding-step = 1; } }
+                            if root.logged-in: Button { label: L.t("Inizia", "Start"); clicked => { root.onboarding-done(); } }
+                        }
+                    }
+                    if root.onboarding-step == 3: VerticalLayout {
+                        spacing: 16px;
+                        SectionTitle { text: L.t("Ascolta da YouTube", "Listen from YouTube"); }
+                        Text {
+                            text: root.ytdlp-found
+                                ? L.t("yt-dlp è pronto. Dopo, importa le tue playlist dalla pagina Playlist o cerca un brano.", "yt-dlp is ready. Next, import your playlists from the Playlists page or search for a song.")
+                                : L.t("Lume usa yt-dlp per prendere l'audio da YouTube. Installalo, poi premi Ricontrolla.", "Lume uses yt-dlp to get audio from YouTube. Install it, then press Check again.");
+                            color: Theme.text;
+                            wrap: word-wrap;
+                        }
+                        Text { text: root.ytdlp-status; color: root.ytdlp-found ? Theme.text-muted : Theme.danger; wrap: word-wrap; }
+                        SubTitle { text: L.t("Collega il tuo account YouTube", "Connect your YouTube account"); }
+                        Text { text: L.t("Accedi con il tuo account Google: senza account, YouTube può bloccare le richieste chiedendo di dimostrare che non sei un bot. Si apre una finestra di accesso; puoi anche farlo dopo dalle Impostazioni.", "Log in with your Google account: without one, YouTube may block requests and ask you to prove you're not a bot. A login window opens; you can also do it later from Settings."); color: Theme.text-muted; wrap: word-wrap; }
+                        YouTubeAccount {
+                            label-width: 0px;
+                            connected: root.youtube-connected;
+                            connect => { root.connect-youtube(); }
+                            disconnect => { root.disconnect-youtube(); }
+                        }
+                        if !root.ytdlp-found: HorizontalLayout {
+                            alignment: start;
+                            spacing: 10px;
+                            Button { ghost: true; label: L.t("Come installarlo", "How to install it"); clicked => { root.open-ytdlp-page(); } }
+                            Button { ghost: true; label: L.t("Ricontrolla", "Check again"); clicked => { root.check-ytdlp(); } }
+                        }
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 10px;
+                            Button { ghost: true; label: L.t("Indietro", "Back"); clicked => { root.onboarding-step = 1; } }
+                            // Second to "Connect" until the account is in.
+                            Button { ghost: !root.youtube-connected; label: L.t("Inizia", "Start"); clicked => { root.onboarding-done(); } }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---------- resize handles (the window has no native frame) ----------
+        // 0=N 1=S 2=W 3=E 4=NW 5=NE 6=SW 7=SE
+        for dir in [0, 1, 2, 3, 4, 5, 6, 7]: TouchArea {
+            x: (dir == 2 || dir == 4 || dir == 6) ? 0px : ((dir == 3 || dir == 5 || dir == 7) ? root.width - 8px : 8px);
+            y: (dir == 0 || dir == 4 || dir == 5) ? 0px : ((dir == 1 || dir == 6 || dir == 7) ? root.height - 8px : 8px);
+            width: (dir == 0 || dir == 1) ? root.width - 16px : 8px;
+            height: (dir == 2 || dir == 3) ? root.height - 16px : 8px;
+            enabled: !root.is-maximized && !root.os-fullscreen;
+            mouse-cursor: (dir == 0 || dir == 1) ? MouseCursor.ns-resize
+                : ((dir == 2 || dir == 3) ? MouseCursor.ew-resize
+                : ((dir == 4 || dir == 7) ? MouseCursor.nwse-resize : MouseCursor.nesw-resize));
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                    root.resize-edge(dir);
+                }
+            }
+        }
+    }
+}

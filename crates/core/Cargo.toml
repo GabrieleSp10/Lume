@@ -1,0 +1,16 @@
+[package]
+name = "app_core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+base64 = "0.23.1"
+directories = "6.0.0"
+keyring = "4.2.0"
+rand = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+thiserror = "2.0.21"
+toml = "1.1.8"
+ureq = { version = "3.5.0", features = ["json", "platform-verifier"] }

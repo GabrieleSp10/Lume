@@ -1,0 +1,10 @@
+# Build output
+target/
+
+# Early experiments: they hold a personal Client ID and a Spotify login in their browser profile
+spike/
+spike-web/
+spike-host/
+
+# Design review notes
+.impeccable/

@@ -1,0 +1,23 @@
+﻿[workspace]
+resolver = "2"
+members = ["crates/core", "crates/player", "crates/ui"]
+exclude = ["spike", "spike-host"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+# A crash ends the app anyway: no unwinding tables to carry.
+panic = "abort"
+
+# `cargo run` stays debuggable but as quick as the real app: the generated UI code is
+# heavy, so unoptimized builds feel slow.
+[profile.dev]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 3

@@ -1,0 +1,171 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Playback engine</title>
+</head>
+<body>
+<script>
+// Hidden playback engine: hosts the official Spotify Web Playback SDK.
+// Rust -> page: window.__cmd(obj).  Page -> Rust: window.ipc.postMessage(json).
+const KEY = new URLSearchParams(location.search).get("k");
+const post = obj => { try { window.ipc.postMessage(JSON.stringify(obj)); } catch (_) {} };
+
+let player = null, deviceId = null;
+
+async function getToken() {
+  const res = await fetch("/token?k=" + encodeURIComponent(KEY));
+  if (!res.ok) throw new Error("token endpoint: " + res.status);
+  return (await res.json()).token;
+}
+
+// Audio of the local engines; each load has a token so Rust can tell songs apart.
+// A video element: YouTube's HLS streams carry the sound inside video, which <audio> refuses.
+const audio = document.createElement("video");
+audio.style.display = "none";
+document.body.appendChild(audio);
+let audioToken = 0;
+let hls = null;
+let hlsScript = null;
+
+function loadHls() {
+  if (!hlsScript) {
+    hlsScript = new Promise((resolve, reject) => {
+      const tag = document.createElement("script");
+      tag.src = "/hls.js";
+      tag.onload = resolve;
+      tag.onerror = () => reject(new Error("hls.js did not load"));
+      document.head.appendChild(tag);
+    });
+  }
+  return hlsScript;
+}
+
+function stopHls() {
+  if (hls) { hls.destroy(); hls = null; }
+}
+
+// HLS comes through the app's own server: YouTube does not let other pages read it directly.
+async function playHls(c) {
+  await loadHls();
+  if (c.token !== audioToken) return;
+  stopHls();
+  hls = new Hls({ maxBufferLength: 30 });
+  hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+    // The sound gets better up to 360p; more picture would only cost bandwidth.
+    const levels = data.levels.map((l, i) => [l.height || 0, i]).sort((a, b) => a[0] - b[0]);
+    const pick = levels.find(([h]) => h >= 360) || levels[levels.length - 1];
+    if (pick) hls.currentLevel = pick[1];
+    audio.currentTime = c.position_ms / 1000;
+    audio.play().catch(e => postAudio("error", { message: String(e) }));
+  });
+  hls.on(Hls.Events.ERROR, (_, data) => {
+    if (data.fatal) postAudio("error", { message: "hls " + data.type + ": " + data.details });
+  });
+  hls.loadSource("/media?k=" + encodeURIComponent(KEY) + "&u=" + encodeURIComponent(c.url));
+  hls.attachMedia(audio);
+}
+
+function isHls(url) {
+  return url.includes(".m3u8") || url.includes("/manifest/hls");
+}
+
+function postAudio(event, extra) {
+  post({ type: "audio", token: audioToken, event, position_ms: audio.currentTime * 1000, duration_ms: (audio.duration || 0) * 1000, ...extra });
+}
+
+audio.addEventListener("playing", () => postAudio("playing"));
+// With hls.js the source is a blob, so "has a source" means src or a live hls player.
+const loaded = () => audio.getAttribute("src") || hls;
+audio.addEventListener("pause", () => { if (!audio.ended && loaded()) postAudio("paused"); });
+audio.addEventListener("ended", () => postAudio("ended"));
+audio.addEventListener("error", () => {
+  if (loaded()) postAudio("error", { message: (audio.error && audio.error.message) || "cannot play the stream" });
+});
+
+const audioCommands = {
+  audio_load: c => {
+    audioToken = c.token;
+    stopHls();
+    if (isHls(c.url)) {
+      playHls(c).catch(e => postAudio("error", { message: String(e) }));
+      return;
+    }
+    audio.src = c.url;
+    audio.currentTime = c.position_ms / 1000;
+    audio.play().catch(e => postAudio("error", { message: String(e) }));
+  },
+  audio_pause: () => audio.pause(),
+  audio_resume: () => audio.play().catch(e => postAudio("error", { message: String(e) })),
+  audio_seek: c => { audio.currentTime = c.position_ms / 1000; },
+  audio_volume: c => { audio.volume = c.value; },
+  audio_stop: () => { stopHls(); audio.pause(); audio.removeAttribute("src"); audio.load(); },
+};
+
+function publishState(s) {
+  if (!s || !s.track_window.current_track) { post({ type: "state", paused: true }); return; }
+  const t = s.track_window.current_track;
+  post({
+    type: "state",
+    paused: s.paused,
+    position_ms: s.position,
+    duration_ms: s.duration,
+    shuffle: s.shuffle,
+    repeat_mode: s.repeat_mode, // 0 off, 1 context, 2 track
+    context_uri: (s.context && s.context.uri) || "",
+    track: {
+      uri: t.uri, name: t.name,
+      artists: t.artists.map(a => a.name),
+      album: t.album.name,
+      image_url: (t.album.images[0] || {}).url || "",
+    },
+  });
+}
+
+// Spotify's player loads only once the user logged in to Spotify.
+let sdkLoaded = false;
+function connectSpotify() {
+  if (player) return;
+  if (sdkLoaded) { window.onSpotifyWebPlaybackSDKReady(); return; }
+  sdkLoaded = true;
+  const s = document.createElement("script");
+  s.src = "https://sdk.scdn.co/spotify-player.js";
+  document.head.appendChild(s);
+}
+
+window.__cmd = async c => {
+  if (audioCommands[c.cmd]) { audioCommands[c.cmd](c); return; }
+  if (c.cmd === "connect_spotify") { connectSpotify(); return; }
+  if (c.cmd === "disconnect_spotify") {
+    if (player) player.disconnect();
+    player = null; deviceId = null;
+    return;
+  }
+  if (!player || !deviceId) { post({ type: "error", message: "engine not ready" }); return; }
+  switch (c.cmd) {
+    case "pause": await player.pause(); break;
+    case "activate": await player.activateElement(); break;
+    case "resume": await player.resume(); break;
+    case "toggle": await player.togglePlay(); break;
+    case "next": await player.nextTrack(); break;
+    case "prev": await player.previousTrack(); break;
+    case "seek": await player.seek(c.position_ms); break;
+    case "volume": await player.setVolume(c.value); break;
+  }
+};
+
+window.onSpotifyWebPlaybackSDKReady = () => {
+  player = new Spotify.Player({ name: "Lume", getOAuthToken: cb => getToken().then(cb), volume: 0.7 });
+  player.addListener("ready", ({ device_id }) => { deviceId = device_id; post({ type: "ready", device_id }); });
+  player.addListener("not_ready", () => { deviceId = null; post({ type: "error", message: "device went offline" }); });
+  for (const k of ["initialization_error", "authentication_error", "account_error", "playback_error"]) {
+    player.addListener(k, e => post({ type: "error", message: k + ": " + e.message }));
+  }
+  player.addListener("player_state_changed", publishState);
+  player.connect();
+};
+
+post({ type: "loaded" });
+</script>
+</body>
+</html>
