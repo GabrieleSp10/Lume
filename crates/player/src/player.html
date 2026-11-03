@@ -74,32 +74,66 @@ function postAudio(event, extra) {
   post({ type: "audio", token: audioToken, event, position_ms: audio.currentTime * 1000, duration_ms: (audio.duration || 0) * 1000, ...extra });
 }
 
-audio.addEventListener("playing", () => postAudio("playing"));
+// A link yt-dlp has just made is refused (403) for its first seconds, then works: a failed
+// direct link is tried again a few times, from where it stopped, before the song counts as failed.
+const RETRY_DELAYS_MS = [500, 1000, 1500, 2000, 2500];
+let direct = null; // { token, url, tries, timer }
+
+function playDirect(position_s) {
+  audio.src = direct.url;
+  audio.currentTime = position_s;
+  audio.play().catch(e => directFailed(String(e)));
+}
+
+function directFailed(message) {
+  if (!direct || direct.token !== audioToken) { postAudio("error", { message }); return; }
+  if (direct.timer) return; // the element and play() both report the same failure
+  const delay = RETRY_DELAYS_MS[direct.tries++];
+  if (delay === undefined) { direct = null; postAudio("error", { message }); return; }
+  const position_s = audio.currentTime;
+  direct.timer = setTimeout(() => {
+    if (!direct || direct.token !== audioToken) return;
+    direct.timer = null;
+    playDirect(position_s);
+  }, delay);
+}
+
+function stopDirect() {
+  if (direct && direct.timer) clearTimeout(direct.timer);
+  direct = null;
+}
+
+audio.addEventListener("playing", () => {
+  if (direct) direct.tries = 0;
+  postAudio("playing");
+});
 // With hls.js the source is a blob, so "has a source" means src or a live hls player.
 const loaded = () => audio.getAttribute("src") || hls;
 audio.addEventListener("pause", () => { if (!audio.ended && loaded()) postAudio("paused"); });
 audio.addEventListener("ended", () => postAudio("ended"));
 audio.addEventListener("error", () => {
-  if (loaded()) postAudio("error", { message: (audio.error && audio.error.message) || "cannot play the stream" });
+  if (!loaded()) return;
+  const message = (audio.error && audio.error.message) || "cannot play the stream";
+  if (direct) directFailed(message); else postAudio("error", { message });
 });
 
 const audioCommands = {
   audio_load: c => {
     audioToken = c.token;
     stopHls();
+    stopDirect();
     if (isHls(c.url)) {
       playHls(c).catch(e => postAudio("error", { message: String(e) }));
       return;
     }
-    audio.src = c.url;
-    audio.currentTime = c.position_ms / 1000;
-    audio.play().catch(e => postAudio("error", { message: String(e) }));
+    direct = { token: c.token, url: c.url, tries: 0, timer: null };
+    playDirect(c.position_ms / 1000);
   },
   audio_pause: () => audio.pause(),
   audio_resume: () => audio.play().catch(e => postAudio("error", { message: String(e) })),
   audio_seek: c => { audio.currentTime = c.position_ms / 1000; },
   audio_volume: c => { audio.volume = c.value; },
-  audio_stop: () => { stopHls(); audio.pause(); audio.removeAttribute("src"); audio.load(); },
+  audio_stop: () => { stopHls(); stopDirect(); audio.pause(); audio.removeAttribute("src"); audio.load(); },
 };
 
 function publishState(s) {

@@ -30,11 +30,14 @@ fn main() {
         backend.connect_spotify();
     }
 
+    // SONG="Artist|Title|seconds" plays another song, never looked up before.
+    let song = env::var("SONG").unwrap_or_else(|_| "Daft Punk|Get Lucky|248".into());
+    let parts: Vec<&str> = song.split('|').collect();
     let track = Track {
-        uri: "spotify:track:69kOkLUCkxIZYexIgSG8rq".into(),
-        name: "Get Lucky".into(),
-        artists: vec!["Daft Punk".into()],
-        duration_ms: 248_000,
+        uri: if parts[1] == "Get Lucky" { "spotify:track:69kOkLUCkxIZYexIgSG8rq".into() } else { format!("smoke:{song}") },
+        name: parts[1].into(),
+        artists: vec![parts[0].into()],
+        duration_ms: parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0) * 1000,
         ..Default::default()
     };
     let started = Instant::now();
