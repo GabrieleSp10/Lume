@@ -13,7 +13,9 @@ use sha2::{Digest, Sha256};
 
 const AUTH_URL: &str = "https://accounts.spotify.com/authorize";
 const TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
-const KEYRING_SERVICE: &str = "SpotifyApp";
+const KEYRING_SERVICE: &str = "Lume";
+/// Where versions before the rename kept the login.
+const OLD_KEYRING_SERVICE: &str = "SpotifyApp";
 const KEYRING_USER: &str = "refresh_token";
 
 /// Renew the access token this long before it actually expires.
@@ -184,8 +186,21 @@ fn entry() -> Result<keyring::Entry, AuthError> {
     keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| AuthError::Keyring(e.to_string()))
 }
 
+fn old_entry() -> Option<keyring::Entry> {
+    keyring::Entry::new(OLD_KEYRING_SERVICE, KEYRING_USER).ok()
+}
+
+/// The saved login; one kept under the old name moves to the new one.
 fn load_refresh_token() -> Option<String> {
-    entry().ok()?.get_password().ok()
+    if let Ok(token) = entry().ok()?.get_password() {
+        return Some(token);
+    }
+    let old = old_entry()?;
+    let token = old.get_password().ok()?;
+    if save_refresh_token(&token).is_ok() {
+        let _ = old.delete_credential();
+    }
+    Some(token)
 }
 
 fn save_refresh_token(token: &str) -> Result<(), AuthError> {
@@ -194,6 +209,9 @@ fn save_refresh_token(token: &str) -> Result<(), AuthError> {
 
 fn delete_refresh_token() {
     if let Ok(e) = entry() {
+        let _ = e.delete_credential();
+    }
+    if let Some(e) = old_entry() {
         let _ = e.delete_credential();
     }
 }

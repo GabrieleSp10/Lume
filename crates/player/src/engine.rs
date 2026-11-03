@@ -98,7 +98,7 @@ fn run(port: u16, key: String, events: Sender<Event>, on_message: PageHandler, p
     let window = WindowBuilder::new()
         .with_title("Playback engine")
         .with_visible(false)
-        .with_window_classname("SpotifyAppPlaybackEngine")
+        .with_window_classname("LumePlaybackEngine")
         .build(&event_loop);
     let window = match window {
         Ok(w) => w,

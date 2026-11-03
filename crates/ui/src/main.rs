@@ -68,6 +68,7 @@ fn select_renderer() {
 
 fn main() -> Result<(), slint::PlatformError> {
     select_renderer();
+    app_core::config::move_old_folders();
     let config = AppConfig::load_or_create().unwrap_or_default();
     let theme = CoreTheme::load_named(&config.theme);
 

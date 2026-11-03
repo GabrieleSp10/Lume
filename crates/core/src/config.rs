@@ -63,8 +63,27 @@ impl AppConfig {
     }
 }
 
+const NAME: &str = "Lume";
+/// The name the app's folders had before it was called Lume.
+const OLD_NAME: &str = "SpotifyApp";
+
 fn dirs() -> ProjectDirs {
-    ProjectDirs::from("", "", "SpotifyApp").expect("no home directory")
+    ProjectDirs::from("", "", NAME).expect("no home directory")
+}
+
+/// Moves the folders of versions before the rename (settings, library, logins) to the new
+/// name. Call before anything reads or creates them.
+pub fn move_old_folders() {
+    let (Some(old), Some(new)) = (ProjectDirs::from("", "", OLD_NAME), ProjectDirs::from("", "", NAME)) else { return };
+    let pairs = [(old.config_dir().parent(), new.config_dir().parent()), (old.data_local_dir().parent(), new.data_local_dir().parent())];
+    for (from, to) in pairs {
+        let (Some(from), Some(to)) = (from, to) else { continue };
+        if from.exists() && !to.exists() {
+            if let Err(e) = fs::rename(from, to) {
+                eprintln!("{} not moved to {}: {e}", from.display(), to.display());
+            }
+        }
+    }
 }
 
 pub fn config_dir() -> PathBuf {

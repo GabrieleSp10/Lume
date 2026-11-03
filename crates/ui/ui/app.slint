@@ -1232,6 +1232,7 @@ export component MainWindow inherits Window {
     callback like-item(int, int);
     callback enqueue-item(int, int);
     callback play-detail();
+    callback enqueue-detail();
     callback like-current();
     callback queue-toggled();
     callback nav-to(int);
@@ -2511,11 +2512,19 @@ export component MainWindow inherits Window {
                                     Text { text: root.detail-subtitle; color: Theme.text-muted; wrap: word-wrap; }
                                     Rectangle { height: 4px; }
                                     HorizontalLayout {
-                                        alignment: start;
                                         spacing: 10px;
-                                        Button { label: L.t("Riproduci", "Play"); enabled: root.detail-tracks.length > 0; clicked => { root.play-detail(); } }
-                                        // Quiet until it is about to act: then it turns red and asks.
+                                        Button { horizontal-stretch: 0; label: L.t("Riproduci", "Play"); enabled: root.detail-tracks.length > 0; clicked => { root.play-detail(); } }
+                                        Button {
+                                            horizontal-stretch: 0;
+                                            ghost: true;
+                                            label: L.t("Aggiungi alla coda", "Add to queue");
+                                            enabled: root.detail-tracks.length > 0;
+                                            clicked => { root.enqueue-detail(); }
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        // Away from the other actions, and quiet until it is about to act: then it turns red and asks.
                                         if root.detail-local: Button {
+                                            horizontal-stretch: 0;
                                             ghost: true;
                                             danger: root.confirm-remove;
                                             label: root.confirm-remove ? L.t("Conferma rimozione", "Confirm removal") : L.t("Rimuovi playlist", "Remove playlist");

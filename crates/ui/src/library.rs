@@ -31,6 +31,8 @@ use crate::{i18n::t, images, memory, models, nav, LyricLine, MainWindow, PageSta
 
 /// How many tracks a "play from here" request queues up when there is no context to play.
 const PLAY_BATCH: usize = 100;
+/// Songs of a playlist queued at once on Spotify, which takes them one request each.
+const SPOTIFY_QUEUE_MAX: usize = 30;
 /// Home shows pages of tiles; the arrows move through the rest.
 const QUICK_PICKS: usize = 30;
 /// Upper bound for one playlist/library load, far above any normal playlist.
@@ -1075,7 +1077,8 @@ impl Library {
     }
 
     /// Plays the tapped track. In a playlist or album the whole context plays from there
-    /// (so shuffle and "next" cover all of it); elsewhere the following tracks of the list.
+    /// (so shuffle and "next" cover all of it); a search result plays alone and then stops;
+    /// elsewhere the following tracks of the list play too.
     pub fn play_track(&self, source: i32, index: i32) {
         if !self.engine_ready() {
             return;
@@ -1095,8 +1098,10 @@ impl Library {
                 return;
             }
         }
+        // Search results are a list of guesses, not something to listen through.
+        let batch = if source == 0 || source == 1 { 1 } else { PLAY_BATCH };
         let tracks: Vec<Track> = (index..model.row_count())
-            .take(PLAY_BATCH)
+            .take(batch)
             .filter_map(|i| model.row_data(i))
             .filter(|row| !row.uri.is_empty())
             .map(|row| models::row_track(&row))
@@ -1258,8 +1263,54 @@ impl Library {
         }
         memory::queue_add(saved);
         self.engine.send(Command::Queue(track));
+        self.queued(&added);
+    }
+
+    /// Adds the whole open playlist or album after what is queued; with nothing playing it
+    /// just plays it.
+    pub fn enqueue_detail(&self) {
+        let tracks: Vec<Track> = models::get().detail_tracks.iter().filter(|row| !row.uri.is_empty()).map(|row| models::row_track(&row)).collect();
+        if tracks.is_empty() {
+            return;
+        }
+        if !self.resume_pending.get() {
+            if !self.engine_ready() {
+                return;
+            }
+            if models::now_uri().is_empty() {
+                self.play_detail();
+                return;
+            }
+        }
+        // Spotify takes queued songs one request each: a long playlist is cut, so it cannot
+        // use up the request quota. The app's own queue takes them all.
+        let limit = if self.resume_pending.get() || self.engine.local_queue().is_some() { usize::MAX } else { SPOTIFY_QUEUE_MAX };
+        let total = tracks.len();
+        for track in tracks.into_iter().take(limit) {
+            memory::queue_add(memory::saved_track(&track, track.duration_ms));
+            if !self.resume_pending.get() {
+                self.engine.send(Command::Queue(track));
+            }
+        }
+        let message = if total > limit {
+            format!("{} {limit} {}", t("Aggiunti alla coda i primi", "Added the first"), t("brani", "songs to the queue"))
+        } else {
+            format!("{} {total} {}", t("Aggiunti alla coda", "Added"), t("brani", "songs to the queue"))
+        };
+        if self.resume_pending.get() {
+            if let Some(ui) = self.ui.upgrade() {
+                crate::toast(&ui, &message);
+            }
+            self.queue_toggled();
+            return;
+        }
+        self.queued(&message);
+    }
+
+    /// Tells what joined the queue and refreshes the queue panel once the engine has it.
+    fn queued(&self, message: &str) {
         if let Some(ui) = self.ui.upgrade() {
-            crate::toast(&ui, &added);
+            crate::toast(&ui, message);
         }
         if self.engine.local_queue().is_some() {
             self.queue_toggled();
@@ -1558,6 +1609,8 @@ pub fn wire(ui: &MainWindow, lib: &Rc<Library>) {
     ui.on_enqueue_item(move |s, i| l.enqueue_item(s, i));
     let l = Rc::clone(lib);
     ui.on_play_detail(move || l.play_detail());
+    let l = Rc::clone(lib);
+    ui.on_enqueue_detail(move || l.enqueue_detail());
     let l = Rc::clone(lib);
     ui.on_play_pause(move || l.play_pause());
     let l = Rc::clone(lib);
