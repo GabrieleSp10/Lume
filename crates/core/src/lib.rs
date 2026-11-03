@@ -8,6 +8,7 @@ pub mod http;
 pub mod limiter;
 pub mod local_library;
 pub mod lyrics;
+pub mod offline;
 pub mod session;
 pub mod spotify_embed;
 pub mod theme;

@@ -30,6 +30,24 @@ Poi premi **Collega account YouTube** e accedi con il tuo account Google: evita 
 
 L'accesso a YouTube resta salvato solo sul tuo computer; «Scollega» lo cancella. Usare yt-dlp va contro le condizioni d'uso di YouTube: fallo a tuo rischio.
 
+## Le tue playlist
+
+- **Nuova playlist** (pagina Playlist): scegli un nome e, se vuoi, un'immagine; senza immagine Lume usa le copertine dei primi 4 brani.
+- Dal menu **…** di ogni brano (o con il tasto destro) lo aggiungi alla coda o a una playlist, lo togli dalla playlist che stai guardando o, se hai attivato l'ascolto offline, lo scarichi.
+- **Crea copia locale** su una playlist di Spotify: Lume cerca gli stessi brani su YouTube e crea una tua playlist con quelli. Da Spotify prende solo titoli e artisti, nient'altro.
+
+## Ascolto offline
+
+È **disattivato** finché non lo attivi tu in **Impostazioni › Ascolto offline**. Poi puoi scaricare un brano dal suo menu **…** o un'intera playlist con **Scarica**.
+
+- Si scaricano **solo brani di YouTube**, mai da Spotify, e restano dentro Lume (`%LOCALAPPDATA%\Lume\data\offline`), che li riproduce anche senza connessione.
+- Lume scarica un brano alla volta, con una pausa tra l'uno e l'altro, e si ferma se YouTube chiede di confermare che non sei un bot.
+- **Le condizioni d'uso di YouTube non consentono di scaricare i contenuti**, salvo dove lo offre YouTube stesso. Se attivi l'ascolto offline lo fai sotto la tua responsabilità, e solo per uso personale.
+
+## In sottofondo
+
+Con **Impostazioni › Generali › Continua quando chiudi** attivo, chiudendo la finestra la musica continua e Lume resta nell'area di notifica: un clic sull'icona la riapre, il tasto destro offre «Riproduci o pausa» ed «Esci». È disattivato all'inizio.
+
 ## Se qualcosa non va
 
 - **VPN o filtri DNS** (es. Norton VPN) possono impedire di raggiungere Spotify, i testi o YouTube: prova a disattivarli o a escludere Lume.
@@ -44,3 +62,10 @@ Rust (stabile) e Windows. Avvio: `cargo run --release -p app_ui --bin lume`. Ins
 - `crates/ui` – interfaccia in [Slint](https://slint.dev)
 
 Componenti di terze parti: [hls.js](https://github.com/video-dev/hls.js) (Apache-2.0, licenza in `crates/player/src/vendor/`), Slint e le librerie elencate in `Cargo.lock` con le rispettive licenze.
+
+## Avvertenze
+
+- Lume è un progetto gratuito e senza scopo di lucro. Non è affiliato né approvato da Spotify, YouTube o Google; i loro nomi servono solo a dire con quali servizi funziona.
+- Lume non contiene né distribuisce musica e non ha server: tutto avviene sul computer di chi lo usa, con i suoi account. yt-dlp e Deno si scaricano dalle loro pagine ufficiali solo se scegli YouTube.
+- Ognuno è responsabile di come lo usa e del rispetto delle condizioni dei servizi a cui si collega.
+- Se ritieni che questo progetto violi un tuo diritto, apri una segnalazione (issue) su GitHub: verrà esaminata subito.

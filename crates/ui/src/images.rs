@@ -5,6 +5,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex, OnceLock,
@@ -79,8 +80,12 @@ fn hub() -> &'static Hub {
     })
 }
 
-/// The image file for `url`, from the disk cache when possible: covers never change.
+/// The image file for `url`, from the disk cache when possible: covers never change. An
+/// address without a scheme is a file of the app's own (a chosen or composed cover).
 fn file_bytes(agent: &ureq::Agent, url: &str, max_side: u32) -> Result<Vec<u8>, String> {
+    if !url.contains("://") {
+        return fs::read(url).map_err(|e| e.to_string());
+    }
     // The whole address names the file: YouTube covers all end in the same "mqdefault.jpg".
     // Small copies for lists are kept apart from the sharp ones for big covers.
     let small = max_side <= THUMBNAIL;
@@ -134,6 +139,28 @@ fn fetch(agent: &ureq::Agent, url: &str, max_side: u32) -> Result<SharedPixelBuf
     let img = if img.width().max(img.height()) > max_side { img.thumbnail(max_side, max_side) } else { img };
     let rgba = img.to_rgba8();
     Ok(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(rgba.as_raw(), rgba.width(), rgba.height()))
+}
+
+/// Side of a composed playlist cover.
+const MOSAIC: u32 = 640;
+
+/// Writes a playlist cover made of four song covers in a square, each cut to a square from
+/// its middle, as YouTube frames are wider than tall. Runs on a worker thread.
+pub fn compose_mosaic(covers: &[String], out: &Path) -> Result<(), String> {
+    let agent = app_core::http::agent(Duration::from_secs(15));
+    let half = MOSAIC / 2;
+    let mut canvas = image::RgbaImage::new(MOSAIC, MOSAIC);
+    for (i, url) in covers.iter().take(4).enumerate() {
+        let img = image::load_from_memory(&file_bytes(&agent, url, FULL)?).map_err(|e| e.to_string())?;
+        let side = img.width().min(img.height());
+        let square = img.crop_imm((img.width() - side) / 2, (img.height() - side) / 2, side, side);
+        let tile = square.resize_exact(half, half, image::imageops::FilterType::Triangle).to_rgba8();
+        image::imageops::replace(&mut canvas, &tile, i64::from(i as u32 % 2 * half), i64::from(i as u32 / 2 * half));
+    }
+    if let Some(dir) = out.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    canvas.save(out).map_err(|e| e.to_string())
 }
 
 /// Queues a big cover unless the URL is empty or already known.

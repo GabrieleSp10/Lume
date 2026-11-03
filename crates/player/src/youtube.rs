@@ -1,14 +1,16 @@
 //! Plays a Spotify track from YouTube: yt-dlp finds the matching video and its audio stream,
-//! and the hidden page plays that stream. yt-dlp is the user's own install, never bundled.
+//! and the hidden page plays that stream, or the downloaded file when there is one. yt-dlp
+//! is installed by the app from its official source on the user's request, never bundled.
 
 use std::{
     collections::HashMap,
     os::windows::process::CommandExt,
     process::Command as Process,
+    path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::Sender,
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     thread,
     time::{Duration, Instant},
@@ -16,8 +18,8 @@ use std::{
 
 use app_core::{
     cache::Store,
-    config::{tools_dir, youtube_cookies_file, AppConfig},
-    tools,
+    config::{offline_dir, tools_dir, youtube_cookies_file, AppConfig},
+    offline, tools,
 };
 use serde_json::{json, Value};
 
@@ -39,6 +41,82 @@ const BLOCK_PAUSE: Duration = Duration::from_secs(15 * 60);
 const MIN_SCORE: f64 = -40.0;
 /// Words that mark a different recording, unless the Spotify title has them too.
 const OTHER_VERSION: [&str; 13] = ["live", "cover", "remix", "karaoke", "instrumental", "sped up", "slowed", "nightcore", "reverb", "8d", "acoustic", "reaction", "tutorial"];
+
+/// A download stops at its next progress line once this is set.
+static CANCEL: AtomicBool = AtomicBool::new(false);
+/// yt-dlp prints one line like this per step: bytes fetched, then the size or its estimate.
+const PROGRESS_TEMPLATE: &str = "download:LUME %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s";
+
+/// Stops the download that is running, if any.
+pub fn cancel_download() {
+    CANCEL.store(true, Ordering::SeqCst);
+}
+
+/// How much of the song a progress line says is done, from 0 to 1.
+fn progress_of(line: &str) -> Option<f32> {
+    let mut fields = line.strip_prefix("LUME ")?.split_whitespace().map(|f| f.parse::<f64>().ok());
+    let done = fields.next()??;
+    let (total, estimate) = (fields.next().flatten(), fields.next().flatten());
+    let total = total.or(estimate).filter(|t| *t > 0.0)?;
+    Some((done / total).clamp(0.0, 1.0) as f32)
+}
+
+/// What the page is given instead of a link for a downloaded song.
+const OFFLINE_PREFIX: &str = "offline:";
+const BLOCKED_MESSAGE: &str = "youtube paused: asked to confirm you're not a bot";
+
+/// One yt-dlp at a time, for playing, copying and downloading alike: bursts are what YouTube
+/// reads as a bot.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+/// YouTube refused with a bot check: nothing is asked until then.
+static BLOCKED_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
+/// Which video plays each song, kept forever.
+static VIDEOS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+fn blocked() -> bool {
+    BLOCKED_UNTIL.lock().unwrap().is_some_and(|until| Instant::now() < until)
+}
+
+/// Asking again right after a bot check keeps the block going: pause instead.
+fn note_block<T>(result: &Result<T, String>) {
+    if let Err(e) = result {
+        if e.contains("not a bot") {
+            *BLOCKED_UNTIL.lock().unwrap() = Some(Instant::now() + BLOCK_PAUSE);
+        }
+    }
+}
+
+fn videos(store: &Store) -> &'static Mutex<HashMap<String, String>> {
+    VIDEOS.get_or_init(|| Mutex::new(store.load(VIDEOS_KEY).map(|c| c.value).unwrap_or_default()))
+}
+
+fn known_video(store: &Store, track: &Track) -> Option<String> {
+    let own = track.uri.strip_prefix(YOUTUBE_URI).filter(|id| is_video_id(id)).map(String::from);
+    own.or_else(|| videos(store).lock().unwrap().get(&track.uri).cloned())
+}
+
+/// The YouTube video that plays `track`: its own for a YouTube song, else the one found
+/// before, else a search. Used to play songs and to copy Spotify playlists.
+pub fn video_for(tool: &Ytdlp, store: &Store, track: &Track) -> Result<String, String> {
+    if let Some(video) = known_video(store, track) {
+        return Ok(video);
+    }
+    let _one_at_a_time = ONE_AT_A_TIME.lock().unwrap();
+    // Another call may have found it while this one waited.
+    if let Some(video) = known_video(store, track) {
+        return Ok(video);
+    }
+    if blocked() {
+        return Err(BLOCKED_MESSAGE.into());
+    }
+    let result = tool.find_video(track);
+    note_block(&result);
+    let video = result?;
+    let mut all = videos(store).lock().unwrap();
+    all.insert(track.uri.clone(), video.clone());
+    store.save(VIDEOS_KEY, &*all);
+    Ok(video)
+}
 
 /// Sends a command to the hidden page.
 pub(crate) type PageSend = Arc<dyn Fn(String) + Send + Sync>;
@@ -92,6 +170,15 @@ impl Ytdlp {
     }
 
     fn run(&self, args: &[&str]) -> Result<String, String> {
+        let output = self.command(args).output().map_err(|e| format!("yt-dlp missing: {e}"))?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        } else {
+            Err(format!("yt-dlp: {}", String::from_utf8_lossy(&output.stderr).trim()))
+        }
+    }
+
+    fn command(&self, args: &[&str]) -> Process {
         let program = if self.path.is_empty() { "yt-dlp" } else { self.path.as_str() };
         let mut process = Process::new(program);
         process.creation_flags(CREATE_NO_WINDOW);
@@ -109,12 +196,8 @@ impl Ytdlp {
         if !self.cookies_file.is_empty() {
             process.args(["--cookies", &self.cookies_file]);
         }
-        let output = process.args(args).output().map_err(|e| format!("yt-dlp missing: {e}"))?;
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-        } else {
-            Err(format!("yt-dlp: {}", String::from_utf8_lossy(&output.stderr).trim()))
-        }
+        process.args(args);
+        process
     }
 
     /// The installed version, or None if yt-dlp cannot be run.
@@ -139,6 +222,65 @@ impl Ytdlp {
         let results: Value = serde_json::from_str(&text).map_err(|e| format!("yt-dlp: unreadable search: {e}"))?;
         let entries = results.get("entries").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
         pick_video(entries, track).ok_or_else(|| format!("no youtube match for {}", track.name))
+    }
+
+    /// Downloads the audio of `video` into the offline folder, as YouTube gives it (no
+    /// conversion), and returns the file. `progress` hears how much is done, from 0 to 1.
+    /// [`cancel_download`] stops it; what was fetched stays, and the next try goes on from there.
+    pub fn download_audio(&self, video: &str, progress: impl Fn(f32)) -> Result<PathBuf, String> {
+        if !is_video_id(video) {
+            return Err("not a video".into());
+        }
+        if let Some(path) = offline::file_for(video) {
+            return Ok(path);
+        }
+        let _one_at_a_time = ONE_AT_A_TIME.lock().unwrap();
+        if blocked() {
+            return Err(BLOCKED_MESSAGE.into());
+        }
+        let dir = offline_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| format!("offline: {e}"))?;
+        let template = dir.join(format!("{video}.%(ext)s"));
+        let url = format!("https://www.youtube.com/watch?v={video}");
+        CANCEL.store(false, Ordering::SeqCst);
+        let args = ["-f", "bestaudio[ext=m4a]/bestaudio", "--no-playlist", "--newline", "--progress-template", PROGRESS_TEMPLATE, "-o", &template.to_string_lossy(), "--", &url];
+        let result = self.run_with_progress(&args, progress);
+        note_block(&result);
+        result?;
+        offline::file_for(video).ok_or_else(|| "yt-dlp: no file".to_string())
+    }
+
+    /// Runs yt-dlp reading its progress lines as they come, so it can be stopped midway.
+    fn run_with_progress(&self, args: &[&str], progress: impl Fn(f32)) -> Result<(), String> {
+        use std::io::{BufRead, BufReader, Read};
+        let mut child = self
+            .command(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("yt-dlp missing: {e}"))?;
+        // Read apart, so a full error pipe never stalls the progress one.
+        let mut stderr = child.stderr.take().expect("piped stderr");
+        let errors = thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stderr.read_to_string(&mut text);
+            text
+        });
+        for line in BufReader::new(child.stdout.take().expect("piped stdout")).lines().map_while(Result::ok) {
+            if CANCEL.load(Ordering::SeqCst) {
+                let _ = child.kill();
+                break;
+            }
+            if let Some(done) = progress_of(&line) {
+                progress(done);
+            }
+        }
+        let status = child.wait().map_err(|e| format!("yt-dlp: {e}"))?;
+        let errors = errors.join().unwrap_or_default();
+        if CANCEL.swap(false, Ordering::SeqCst) {
+            return Err("cancelled".into());
+        }
+        if status.success() { Ok(()) } else { Err(format!("yt-dlp: {}", errors.trim())) }
     }
 
     fn stream_url(&self, video: &str) -> Result<String, String> {
@@ -218,63 +360,43 @@ fn is_video_id(id: &str) -> bool {
     id.len() == 11 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Remembers which video plays a song (forever) and its stream link (for a few hours).
+/// Finds what plays a song: the downloaded file, or a stream link (kept a few hours).
 pub(crate) struct Resolver {
     tool: Ytdlp,
     store: Store,
-    videos: Mutex<HashMap<String, String>>,
     streams: Mutex<HashMap<String, (Instant, String)>>,
-    /// YouTube refused with a bot check: nothing is asked until then.
-    blocked_until: Mutex<Option<Instant>>,
-    /// One yt-dlp at a time: bursts are what YouTube reads as a bot.
-    busy: Mutex<()>,
 }
 
 impl Resolver {
     pub(crate) fn new(tool: Ytdlp, store: Store) -> Self {
-        let videos = store.load(VIDEOS_KEY).map(|c| c.value).unwrap_or_default();
-        Self { tool, store, videos: Mutex::new(videos), streams: Mutex::default(), blocked_until: Mutex::default(), busy: Mutex::default() }
+        Self { tool, store, streams: Mutex::default() }
     }
 
     fn blocked(&self) -> bool {
-        self.blocked_until.lock().unwrap().is_some_and(|until| Instant::now() < until)
+        blocked()
     }
 
     fn stream_for(&self, track: &Track) -> Result<String, String> {
-        let result = self.resolve(track);
-        if let Err(e) = &result {
-            if e.contains("not a bot") {
-                *self.blocked_until.lock().unwrap() = Some(Instant::now() + BLOCK_PAUSE);
-            }
+        // A downloaded song plays from its file, even without a connection.
+        if let Some(video) = known_video(&self.store, track).filter(|video| offline::file_for(video).is_some()) {
+            return Ok(format!("{OFFLINE_PREFIX}{video}"));
         }
-        result
-    }
-
-    fn resolve(&self, track: &Track) -> Result<String, String> {
-        if let Some((_, url)) = self.streams.lock().unwrap().get(&track.uri).filter(|(at, _)| at.elapsed() < STREAM_FRESH) {
-            return Ok(url.clone());
+        let fresh = |streams: &HashMap<String, (Instant, String)>| streams.get(&track.uri).filter(|(at, _)| at.elapsed() < STREAM_FRESH).map(|(_, url)| url.clone());
+        if let Some(url) = fresh(&self.streams.lock().unwrap()) {
+            return Ok(url);
         }
-        let _one_at_a_time = self.busy.lock().unwrap();
+        let video = video_for(&self.tool, &self.store, track)?;
+        let _one_at_a_time = ONE_AT_A_TIME.lock().unwrap();
         // Another load may have resolved it while this one waited.
-        if let Some((_, url)) = self.streams.lock().unwrap().get(&track.uri).filter(|(at, _)| at.elapsed() < STREAM_FRESH) {
-            return Ok(url.clone());
+        if let Some(url) = fresh(&self.streams.lock().unwrap()) {
+            return Ok(url);
         }
-        if self.blocked() {
-            return Err("youtube paused: asked to confirm you're not a bot".into());
+        if blocked() {
+            return Err(BLOCKED_MESSAGE.into());
         }
-        let own = track.uri.strip_prefix(YOUTUBE_URI).filter(|id| is_video_id(id)).map(String::from);
-        let known = own.or_else(|| self.videos.lock().unwrap().get(&track.uri).cloned());
-        let video = match known {
-            Some(video) => video,
-            None => {
-                let video = self.tool.find_video(track)?;
-                let mut videos = self.videos.lock().unwrap();
-                videos.insert(track.uri.clone(), video.clone());
-                self.store.save(VIDEOS_KEY, &*videos);
-                video
-            }
-        };
-        let url = self.tool.stream_url(&video)?;
+        let result = self.tool.stream_url(&video);
+        note_block(&result);
+        let url = result?;
         self.streams.lock().unwrap().insert(track.uri.clone(), (Instant::now(), url.clone()));
         Ok(url)
     }
@@ -364,6 +486,14 @@ mod tests {
 
     fn video(id: &str, title: &str, channel: &str, duration: f64) -> Value {
         json!({ "id": id, "title": title, "channel": channel, "duration": duration })
+    }
+
+    #[test]
+    fn reads_download_progress() {
+        assert_eq!(progress_of("LUME 500 1000 NA"), Some(0.5));
+        assert_eq!(progress_of("LUME 250 NA 1000.0"), Some(0.25));
+        assert_eq!(progress_of("LUME 10 NA NA"), None);
+        assert_eq!(progress_of("[download] Destination: x.m4a"), None);
     }
 
     #[test]

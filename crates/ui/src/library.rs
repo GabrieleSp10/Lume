@@ -29,6 +29,9 @@ use slint::{Model, ModelRc, SharedString, Timer, TimerMode, VecModel, Weak};
 
 use crate::{i18n::t, images, memory, models, nav, LyricLine, MainWindow, PageState};
 
+mod collection;
+pub mod downloads;
+
 /// How many tracks a "play from here" request queues up when there is no context to play.
 const PLAY_BATCH: usize = 100;
 /// Songs of a playlist queued at once on Spotify, which takes them one request each.
@@ -362,7 +365,12 @@ fn imported_summary(p: &ImportedPlaylist) -> PlaylistSummary {
         uri: p.uri(),
         name: p.name.clone(),
         // The source has its own label on the playlist page; the card keeps just the owner.
-        owner: if p.owner.is_empty() { source_name(p).to_string() } else { p.owner.clone() },
+        owner: match collection::origin_text(p) {
+            Some(origin) if p.source == app_core::local_library::SOURCE_OWN => origin,
+            Some(_) => t("Copia con YouTube", "Copy with YouTube").to_string(),
+            None if p.owner.is_empty() => source_name(p).to_string(),
+            None => p.owner.clone(),
+        },
         image_url: p.image_url.clone(),
         track_count: Some(p.tracks.len() as u32),
         snapshot_id: String::new(),
@@ -419,6 +427,7 @@ fn import_from(source: i32, link: &str, api: &Api, spotify: bool) -> Result<Impo
         source: "youtube".into(),
         total: tracks.len() as u32,
         tracks: tracks.into_iter().map(summary_of).collect(),
+        ..Default::default()
     })
 }
 
@@ -852,7 +861,17 @@ impl Library {
             self.begin_detail(&item, &imported_summary(&playlist).owner);
             if let Some(ui) = self.ui.upgrade() {
                 ui.set_detail_local(true);
-                ui.set_detail_source(format!("{} {}", t("Importata da", "Imported from"), source_name(&playlist)).into());
+                // The subtitle already says a playlist is the user's own: no label for it.
+                let origin = match collection::origin_text(&playlist) {
+                    Some(_) if playlist.source == app_core::local_library::SOURCE_OWN => String::new(),
+                    Some(origin) => origin,
+                    None => format!("{} {}", t("Importata da", "Imported from"), source_name(&playlist)),
+                };
+                ui.set_detail_source(origin.into());
+                // An import from Spotify can become the user's own, from YouTube.
+                ui.set_detail_copyable(playlist.source == "spotify");
+                collection::copy_text_for(&item.uri, &ui);
+                downloads::show_state(&ui, &playlist);
                 ui.set_detail_count(imported_count(&playlist).into());
                 if playlist.total > playlist.tracks.len() as u32 {
                     ui.set_detail_note(
@@ -907,6 +926,11 @@ impl Library {
         ui.set_detail_has_art(false);
         ui.set_detail_liked_songs(item.kind == 3);
         ui.set_detail_local(false);
+        ui.set_detail_editing(false);
+        ui.set_detail_downloadable(false);
+        // Spotify's own lists can be copied; set again below for the ones that cannot.
+        ui.set_detail_copyable(self.spotify() && !item.uri.starts_with(LOCAL_PLAYLIST));
+        collection::copy_text_for(&item.uri, &ui);
         ui.set_detail_source("".into());
         ui.set_detail_note("".into());
         ui.set_detail_count("".into());
@@ -1080,6 +1104,8 @@ impl Library {
     /// (so shuffle and "next" cover all of it); a search result plays alone and then stops;
     /// elsewhere the following tracks of the list play too.
     pub fn play_track(&self, source: i32, index: i32) {
+        // A plain click ends picking songs.
+        self.clear_selection();
         if !self.engine_ready() {
             return;
         }
@@ -1273,12 +1299,24 @@ impl Library {
         if tracks.is_empty() {
             return;
         }
+        if !self.resume_pending.get() && self.engine_ready() && models::now_uri().is_empty() {
+            self.play_detail();
+            return;
+        }
+        self.enqueue_tracks(tracks);
+    }
+
+    /// Adds songs after what is queued; with nothing playing they just play.
+    pub(crate) fn enqueue_tracks(&self, tracks: Vec<Track>) {
+        if tracks.is_empty() {
+            return;
+        }
         if !self.resume_pending.get() {
             if !self.engine_ready() {
                 return;
             }
             if models::now_uri().is_empty() {
-                self.play_detail();
+                self.start(PlayRequest { tracks, start: Some(0), ..Default::default() });
                 return;
             }
         }
@@ -1491,7 +1529,11 @@ impl Library {
 fn show_playlists(list: &[PlaylistSummary], local: &LocalLibrary, ui: &Weak<MainWindow>) {
     let mut items = vec![models::liked_card()];
     items.extend(list.iter().map(|p| models::playlist_item(p, ui)));
-    items.extend(local.playlists().iter().map(|p| {
+    let own = local.playlists();
+    if let Some(ui) = ui.upgrade() {
+        collection::set_targets(&ui, &own);
+    }
+    items.extend(own.iter().map(|p| {
         let mut item = models::playlist_item(&imported_summary(p), ui);
         item.subtitle = format!("{} · {}", imported_summary(p).owner, imported_count(p)).into();
         item
@@ -1625,6 +1667,30 @@ pub fn wire(ui: &MainWindow, lib: &Rc<Library>) {
     ui.on_import_playlist(move |source, link| l.import_playlist(source, &link));
     let l = Rc::clone(lib);
     ui.on_remove_local_playlist(move || l.remove_local_playlist());
+    let l = Rc::clone(lib);
+    ui.on_track_menu(move |s, i, action, arg| l.track_menu(s, i, action, arg));
+    let l = Rc::clone(lib);
+    ui.on_select_track(move |s, i, mode| l.select_track(s, i, mode));
+    let l = Rc::clone(lib);
+    ui.on_clear_selection(move || l.clear_selection());
+    let l = Rc::clone(lib);
+    ui.on_create_playlist(move |name| l.create_playlist(&name));
+    let l = Rc::clone(lib);
+    ui.on_pick_playlist_cover(move || l.pick_playlist_cover());
+    let l = Rc::clone(lib);
+    ui.on_clear_playlist_cover(move || l.clear_playlist_cover());
+    let l = Rc::clone(lib);
+    ui.on_edit_playlist(move || l.edit_playlist());
+    let l = Rc::clone(lib);
+    ui.on_save_playlist(move |name| l.save_playlist(&name));
+    let l = Rc::clone(lib);
+    ui.on_copy_detail(move || l.copy_detail());
+    let l = Rc::clone(lib);
+    ui.on_download_detail(move || downloads::toggle_open(&l));
+    let l = Rc::clone(lib);
+    ui.on_offline_changed(move |on| downloads::set_enabled(&l, on));
+    let l = Rc::clone(lib);
+    ui.on_delete_downloads(move || downloads::delete_all(&l));
 }
 
 #[cfg(test)]

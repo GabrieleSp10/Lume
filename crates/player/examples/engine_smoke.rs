@@ -1,5 +1,6 @@
 //! Plays one song through a real engine and prints what happens, without the UI.
 //! Usage: engine_smoke [youtube|librespot|spotify] [seconds]
+//! VIDEO=<id> plays that YouTube video, downloading it first when DOWNLOAD=1.
 
 use std::{
     env,
@@ -39,6 +40,16 @@ fn main() {
         artists: vec![parts[0].into()],
         duration_ms: parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0) * 1000,
         ..Default::default()
+    };
+    let track = match env::var("VIDEO") {
+        Ok(video) => {
+            if env::var("DOWNLOAD").is_ok() {
+                let at = Instant::now();
+                println!("download: {:?} in {:.1}s", Ytdlp::from_config(&config).download_audio(&video, |done| println!("  {:.0}%", done * 100.0)), at.elapsed().as_secs_f32());
+            }
+            Track { uri: format!("youtube:{video}"), name: video, ..Default::default() }
+        }
+        Err(_) => track,
     };
     let started = Instant::now();
     let mut asked = false;

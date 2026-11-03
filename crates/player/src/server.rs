@@ -4,8 +4,15 @@
 //!   GET /token?k=<key>       fresh access token for the player page
 //!   GET /hls.js              the HLS player library (Apache-2.0, see vendor/hls.js-LICENSE)
 //!   GET /media?k=<key>&u=..  YouTube's HLS streams, relayed so the page may read them
+//!   GET /offline?k=<key>&id=..  a downloaded song, with byte ranges for seeking
 
-use std::{io, sync::{mpsc::Sender, Arc}, thread, time::Duration};
+use std::{
+    fs::File,
+    io::{self, Read, Seek, SeekFrom},
+    sync::{mpsc::Sender, Arc},
+    thread,
+    time::Duration,
+};
 
 use app_core::auth::{percent_encode, Auth};
 use tiny_http::{Header, Request, Response, Server};
@@ -46,6 +53,16 @@ fn handle(request: Request, auth: &Auth, port: u16, key: &str, events: &Sender<E
     let param = |name: &str| query_param(query, name);
     let key_ok = param("k").as_deref() == Some(key);
 
+    if path == "/offline" && key_ok {
+        // A song is read while it plays: each gets its own thread.
+        let video = param("id").unwrap_or_default();
+        let range = request.headers().iter().find(|h| h.field.equiv("Range")).map(|h| h.value.as_str().to_string());
+        thread::spawn(move || {
+            let _ = request.respond(offline_file(&video, range.as_deref()));
+        });
+        return;
+    }
+
     if path == "/media" && key_ok {
         // Segments are big and slow next to tokens: each gets its own thread.
         let (agent, key, target) = (agent.clone(), key.to_string(), param("u").unwrap_or_default());
@@ -65,10 +82,49 @@ fn handle(request: Request, auth: &Auth, port: u16, key: &str, events: &Sender<E
             Ok(token) => json(format!("{{\"token\":\"{token}\"}}"), 200),
             Err(e) => json(format!("{{\"error\":{:?}}}", e.to_string()), 401),
         },
-        "/player" | "/token" | "/media" => Response::from_string("forbidden").with_status_code(403),
+        "/player" | "/token" | "/media" | "/offline" => Response::from_string("forbidden").with_status_code(403),
         _ => Response::from_string("not found").with_status_code(404),
     };
     let _ = request.respond(response);
+}
+
+/// A downloaded song, whole or the byte range the media element asks for.
+fn offline_file(video: &str, range: Option<&str>) -> Response<Box<dyn Read + Send>> {
+    let not_found = || Response::new(404.into(), Vec::new(), Box::new(io::empty()) as Box<dyn Read + Send>, Some(0), None);
+    let Some(path) = app_core::offline::file_for(video) else { return not_found() };
+    let Ok(mut file) = File::open(&path) else { return not_found() };
+    let Ok(size) = file.metadata().map(|m| m.len()) else { return not_found() };
+    let kind = match path.extension().and_then(|e| e.to_str()) {
+        Some("webm") => "audio/webm",
+        Some("opus") | Some("ogg") => "audio/ogg",
+        _ => "audio/mp4",
+    };
+    let mut headers = vec![header("Content-Type", kind), header("Accept-Ranges", "bytes"), header("Cache-Control", "no-store")];
+    let (status, start, end) = match range.and_then(|r| byte_range(r, size)) {
+        Some((start, end)) => {
+            headers.push(header("Content-Range", &format!("bytes {start}-{end}/{size}")));
+            (206, start, end)
+        }
+        None => (200, 0, size.saturating_sub(1)),
+    };
+    if size == 0 || file.seek(SeekFrom::Start(start)).is_err() {
+        return not_found();
+    }
+    let length = end - start + 1;
+    Response::new(status.into(), headers, Box::new(file.take(length)), Some(length as usize), None)
+}
+
+/// The first range of a "bytes=start-end" header, inside a file of `size` bytes.
+fn byte_range(header: &str, size: u64) -> Option<(u64, u64)> {
+    let (start, end) = header.strip_prefix("bytes=")?.split(',').next()?.trim().split_once('-')?;
+    let (start, end) = match (start.parse::<u64>().ok(), end.parse::<u64>().ok()) {
+        (Some(start), Some(end)) => (start, end.min(size.checked_sub(1)?)),
+        (Some(start), None) => (start, size.checked_sub(1)?),
+        // "bytes=-500": the last 500 bytes.
+        (None, Some(last)) => (size.checked_sub(last.min(size))?, size.checked_sub(1)?),
+        (None, None) => return None,
+    };
+    (start <= end && start < size).then_some((start, end))
 }
 
 /// Host of an https URL, if it is one.
@@ -230,6 +286,18 @@ fn percent_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_byte_ranges() {
+        assert_eq!(byte_range("bytes=0-", 1000), Some((0, 999)));
+        assert_eq!(byte_range("bytes=100-199", 1000), Some((100, 199)));
+        assert_eq!(byte_range("bytes=900-5000", 1000), Some((900, 999)));
+        assert_eq!(byte_range("bytes=-100", 1000), Some((900, 999)));
+        assert_eq!(byte_range("bytes=1000-", 1000), None);
+        assert_eq!(byte_range("bytes=5-2", 1000), None);
+        assert_eq!(byte_range("items=0-1", 1000), None);
+        assert_eq!(byte_range("bytes=0-", 0), None);
+    }
 
     #[test]
     fn decodes_query_values() {

@@ -122,6 +122,8 @@ const audioCommands = {
     audioToken = c.token;
     stopHls();
     stopDirect();
+    // A downloaded song comes from the app's own server, with no connection needed.
+    if (c.url.startsWith("offline:")) c.url = "/offline?k=" + encodeURIComponent(KEY) + "&id=" + encodeURIComponent(c.url.slice(8));
     if (isHls(c.url)) {
       playHls(c).catch(e => postAudio("error", { message: String(e) }));
       return;

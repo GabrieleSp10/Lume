@@ -59,6 +59,8 @@ struct Current {
 thread_local! {
     static MODELS: RefCell<Option<Models>> = const { RefCell::new(None) };
     static CURRENT: RefCell<Current> = RefCell::new(Current::default());
+    /// YouTube videos downloaded, so rows can show it without reading the disk each time.
+    static OFFLINE: RefCell<std::collections::HashSet<String>> = RefCell::new(app_core::offline::downloaded());
 }
 
 /// Creates the models and binds them to the window. Call once on the UI thread.
@@ -151,6 +153,122 @@ pub fn set_liked_everywhere(ui: &MainWindow, uri: &str, liked: bool) {
     }
 }
 
+/// Marks every row of a YouTube video as downloaded or not.
+pub fn set_offline(video: &str, offline: bool) {
+    OFFLINE.with(|o| {
+        let mut set = o.borrow_mut();
+        if offline { set.insert(video.to_string()) } else { set.remove(video) }
+    });
+    mark_offline(|uri| app_core::offline::video_id(uri) == Some(video), offline);
+}
+
+/// Reads the downloads again, after all of them were deleted.
+pub fn reload_offline() {
+    OFFLINE.with(|o| *o.borrow_mut() = app_core::offline::downloaded());
+    mark_offline(|_| true, false);
+}
+
+fn mark_offline(matches: impl Fn(&str) -> bool, offline: bool) {
+    for model in get().all() {
+        for i in 0..model.row_count() {
+            if let Some(mut row) = model.row_data(i) {
+                if row.youtube && row.offline != offline && matches(&row.uri) {
+                    row.offline = offline;
+                    model.set_row_data(i, row);
+                }
+            }
+        }
+    }
+}
+
+/// Shows a song waiting (1) or downloading (2, with its progress) in every list, or neither (0).
+pub fn set_download_state(uri: &str, state: i32, progress: f32) {
+    for model in get().all() {
+        for i in 0..model.row_count() {
+            if let Some(mut row) = model.row_data(i) {
+                if row.uri == uri && (row.download_state != state || row.download_progress != progress) {
+                    row.download_state = state;
+                    row.download_progress = progress;
+                    model.set_row_data(i, row);
+                }
+            }
+        }
+    }
+}
+
+/// A Spotify song became its YouTube one: the rows follow, already downloaded.
+pub fn rename_uri(old: &str, new: &str, video: &str) {
+    for model in get().all() {
+        for i in 0..model.row_count() {
+            if let Some(mut row) = model.row_data(i) {
+                if row.uri == old {
+                    row.uri = new.into();
+                    row.youtube = true;
+                    row.offline = OFFLINE.with(|o| o.borrow().contains(video));
+                    model.set_row_data(i, row);
+                }
+            }
+        }
+    }
+}
+
+// ---- several songs picked with Ctrl and Shift ----
+
+thread_local! {
+    /// The list and row a Shift selection counts from.
+    static ANCHOR: std::cell::Cell<Option<(i32, usize)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Ctrl (mode 1) adds or removes a song from the selection; Shift (2) selects from the last
+/// one picked up to it. Returns how many songs are selected.
+pub fn select(source: i32, index: usize, mode: i32) -> usize {
+    let models = get();
+    let Some(model) = models.track_source(source) else { return 0 };
+    if ANCHOR.with(|a| a.get()).is_some_and(|(s, _)| s != source) {
+        clear_selection();
+    }
+    let anchor = ANCHOR.with(|a| a.get()).map(|(_, i)| i);
+    match (mode, anchor) {
+        (2, Some(from)) => {
+            let (low, high) = (from.min(index), from.max(index));
+            for i in 0..model.row_count() {
+                set_selected(model, i, (low..=high).contains(&i));
+            }
+        }
+        _ => {
+            let on = model.row_data(index).is_some_and(|row| !row.selected);
+            set_selected(model, index, on);
+            ANCHOR.with(|a| a.set(Some((source, index))));
+        }
+    }
+    selected_rows(source).len()
+}
+
+fn set_selected(model: &VecModel<Item>, i: usize, on: bool) {
+    if let Some(mut row) = model.row_data(i).filter(|row| row.selected != on) {
+        row.selected = on;
+        model.set_row_data(i, row);
+    }
+}
+
+/// The selected rows of a list, in order.
+pub fn selected_rows(source: i32) -> Vec<Item> {
+    get().track_source(source).map(|model| model.iter().filter(|row| row.selected).collect()).unwrap_or_default()
+}
+
+pub fn clear_selection() {
+    ANCHOR.with(|a| a.set(None));
+    for model in get().all() {
+        for i in 0..model.row_count() {
+            set_selected(model, i, false);
+        }
+    }
+}
+
+fn is_offline(uri: &str) -> bool {
+    app_core::offline::video_id(uri).is_some_and(|video| OFFLINE.with(|o| o.borrow().contains(video)))
+}
+
 /// Sets the hearts of a list loaded without them; `uris[i]` must match row `i`.
 pub fn apply_likes(model: &VecModel<Item>, uris: &[String], flags: &[bool]) {
     for (i, (uri, &liked)) in uris.iter().zip(flags).enumerate() {
@@ -191,6 +309,8 @@ pub fn track_item(t: &TrackSummary, liked: bool, ui: &slint::Weak<MainWindow>) -
             image_url: t.image_url.as_str().into(),
             explicit: t.explicit,
             liked,
+            youtube: app_core::offline::video_id(&t.uri).is_some(),
+            offline: is_offline(&t.uri),
             ..Default::default()
         },
         images::THUMBNAIL,

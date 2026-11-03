@@ -70,6 +70,14 @@ export struct Item {
     has-image: bool,
     liked: bool,
     explicit: bool,
+    // A YouTube song, which may be downloaded; `offline` once it is.
+    youtube: bool,
+    offline: bool,
+    // Downloading: 0 not, 1 waiting its turn, 2 now (with its progress, 0 to 1).
+    download-state: int,
+    download-progress: float,
+    // Picked with Ctrl or Shift, for the song menu to act on several songs.
+    selected: bool,
 }
 
 export struct LyricLine {
@@ -916,6 +924,313 @@ component TitleLine inherits HorizontalLayout {
     if root.explicit: VerticalLayout { alignment: center; ExplicitBadge { } }
 }
 
+// The raised surface of menus, like the queue panel and the toast.
+component MenuSurface inherits Rectangle {
+    border-radius: Theme.radius-medium;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.window-tint.with-alpha(1.0).darker(0.25);
+    drop-shadow-blur: 18px;
+    drop-shadow-offset-y: 6px;
+    drop-shadow-color: #00000060;
+}
+
+// One line of a menu.
+component MenuEntry inherits Rectangle {
+    in property <string> label;
+    in property <bool> danger: false;
+    // It opens a further choice.
+    in property <bool> more: false;
+    callback clicked;
+    // The pointer came onto it.
+    callback entered;
+    property <bool> hovering: ta.has-hover;
+    changed hovering => {
+        if (self.hovering) {
+            root.entered();
+        }
+    }
+    height: 34px;
+    border-radius: Theme.radius-small;
+    background: ta.has-hover ? Theme.text.with-alpha(0.08) : transparent;
+    animate background { duration: Motion.quick; }
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 8px;
+        spacing: 8px;
+        Text { text: root.label; color: root.danger ? Theme.danger : Theme.text; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+        if root.more: VerticalLayout {
+            alignment: center;
+            Image { source: @image-url("icons/chevron-right.svg"); width: 14px; height: 14px; colorize: Theme.text-muted; }
+        }
+    }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+component MenuSeparator inherits VerticalLayout {
+    padding-top: 4px;
+    padding-bottom: 4px;
+    Rectangle { height: 1px; background: Theme.border; }
+}
+
+// What can be done with one song (or the songs selected). Actions: 0 queue, 1 add to the
+// playlist `arg` (-1 a new one), 2 remove from this playlist, 3 download, 4 remove the download.
+component TrackMenu inherits VerticalLayout {
+    in property <[string]> playlists;
+    in property <bool> in-playlist;
+    in property <bool> can-download;
+    in property <bool> downloaded;
+    // How many songs it acts on, when more than one is selected.
+    in property <int> count: 1;
+    callback act(int, int);
+    // The pointer is on "Add to playlist" (true) or on another line (false).
+    callback choose(bool);
+    padding: 6px;
+    spacing: 2px;
+    if root.count > 1: HorizontalLayout {
+        padding-left: 12px;
+        height: 28px;
+        Text { text: root.count + " " + L.t("brani selezionati", "songs selected"); color: Theme.text-muted; vertical-alignment: center; }
+    }
+    MenuEntry { label: L.t("Aggiungi alla coda", "Add to queue"); entered => { root.choose(false); } clicked => { root.act(0, 0); } }
+    // With a single playlist there is nothing to choose.
+    MenuEntry {
+        label: root.playlists.length == 1 ? L.t("Aggiungi a ", "Add to ") + root.playlists[0] : L.t("Aggiungi a playlist", "Add to playlist");
+        more: root.playlists.length != 1;
+        entered => { root.choose(root.playlists.length != 1); }
+        clicked => {
+            if (root.playlists.length == 1) {
+                root.act(1, 0);
+            } else {
+                root.choose(true);
+            }
+        }
+    }
+    if root.can-download: MenuEntry {
+        label: root.downloaded ? L.t("Rimuovi download", "Remove download") : L.t("Scarica", "Download");
+        entered => { root.choose(false); }
+        clicked => { root.act(root.downloaded ? 4 : 3, 0); }
+    }
+    if root.in-playlist: MenuSeparator { }
+    if root.in-playlist: MenuEntry {
+        danger: true;
+        label: L.t("Rimuovi da questa playlist", "Remove from this playlist");
+        entered => { root.choose(false); }
+        clicked => { root.act(2, 0); }
+    }
+}
+
+// The playlists a song can go to, beside the song menu.
+component PlaylistChooser inherits VerticalLayout {
+    in property <[string]> playlists;
+    callback act(int, int);
+    padding: 6px;
+    spacing: 2px;
+    MenuEntry { label: L.t("Nuova playlist…", "New playlist…"); clicked => { root.act(1, -1); } }
+    if root.playlists.length > 0: MenuSeparator { }
+    Flickable {
+        // A long list of playlists scrolls instead of leaving the window.
+        height: Math.min(list.preferred-height, 280px);
+        content-height: list.preferred-height;
+        list := VerticalLayout {
+            spacing: 2px;
+            for name[i] in root.playlists: MenuEntry { label: name; clicked => { root.act(1, i); } }
+        }
+    }
+}
+
+// A ring that fills as a song downloads: empty while it waits its turn, a turning arc while
+// the download starts.
+component ProgressRing inherits Rectangle {
+    in property <float> progress;
+    in property <bool> active;
+    width: 16px;
+    height: 16px;
+    property <float> done: Math.clamp(root.progress, 0, 0.999);
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        stroke: Theme.text.with-alpha(0.3);
+        stroke-width: 2.4px;
+        MoveTo { x: 12; y: 2.5; }
+        ArcTo { x: 12; y: 21.5; radius-x: 9.5; radius-y: 9.5; sweep: true; }
+        ArcTo { x: 12; y: 2.5; radius-x: 9.5; radius-y: 9.5; sweep: true; }
+    }
+    if root.active && root.done > 0.005: Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        stroke: Theme.primary;
+        stroke-width: 2.4px;
+        MoveTo { x: 12; y: 2.5; }
+        ArcTo {
+            x: 12 + 9.5 * Math.sin(root.done * 360deg);
+            y: 12 - 9.5 * Math.cos(root.done * 360deg);
+            radius-x: 9.5;
+            radius-y: 9.5;
+            large-arc: root.done > 0.5;
+            sweep: true;
+        }
+    }
+    if root.active && root.done <= 0.005: Rectangle {
+        transform-rotation: Math.mod(animation-tick() / 1ms, 900) / 900 * 360deg;
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            stroke: Theme.primary;
+            stroke-width: 2.4px;
+            MoveTo { x: 12; y: 2.5; }
+            ArcTo { x: 21.5; y: 12; radius-x: 9.5; radius-y: 9.5; sweep: true; }
+        }
+    }
+}
+
+// The download action of a playlist: "Download", its progress while it runs (pressing it
+// then stops, keeping what is done), or "Remove download".
+component DownloadButton inherits Rectangle {
+    in property <int> state; // 0 not kept, 1 downloading, 2 kept offline
+    in property <float> progress;
+    in property <string> text;
+    callback clicked;
+    property <string> label: root.state == 1 ? (ta.has-hover ? L.t("Interrompi", "Stop") : root.text)
+        : root.state == 2 ? L.t("Rimuovi download", "Remove download") : L.t("Scarica", "Download");
+    height: 38px;
+    // While it runs the words change on hover: a steady width keeps the row from jumping.
+    width: root.state == 1 ? Math.max(row.preferred-width, 210px) : row.preferred-width;
+    border-radius: Theme.radius-small;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: ta.has-hover ? Theme.text.with-alpha(0.08) : transparent;
+    animate background { duration: Motion.quick; }
+    accessible-role: button;
+    accessible-label: root.state == 1 ? L.t("Interrompi il download", "Stop the download") + ", " + root.text : root.label;
+    accessible-action-default => { root.clicked(); }
+    focus := FocusScope {
+        focus-on-click: false;
+        key-pressed(e) => {
+            if (e.text == " " || e.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+    row := HorizontalLayout {
+        padding-left: root.state == 1 ? 12px : 18px;
+        padding-right: 18px;
+        spacing: 10px;
+        alignment: center;
+        if root.state == 1: VerticalLayout {
+            alignment: center;
+            ProgressRing { width: 18px; height: 18px; progress: root.progress; active: true; }
+        }
+        Text {
+            text: root.label;
+            color: Theme.text;
+            font-weight: 600;
+            vertical-alignment: center;
+            transform-scale: ta.pressed ? 0.95 : 1;
+            animate transform-scale { duration: Motion.quick; easing: ease-out-back; }
+        }
+    }
+    if focus.has-focus: FocusRing { border-radius: parent.border-radius; }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+// One-line text field with a hint while empty.
+component FieldInput inherits Rectangle {
+    in property <string> hint;
+    in-out property <string> text;
+    callback accepted();
+    height: 38px;
+    border-radius: Theme.radius-small;
+    background: Theme.text.with-alpha(0.06);
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.primary : Theme.border;
+    animate border-color { duration: Motion.quick; }
+    if root.text == "": Text { x: 12px; text: root.hint; color: Theme.text-muted; vertical-alignment: center; }
+    input := TextInput {
+        x: 12px;
+        width: parent.width - 24px;
+        text <=> root.text;
+        color: Theme.text;
+        selection-background-color: Theme.primary.with-alpha(0.4);
+        vertical-alignment: center;
+        single-line: true;
+        accessible-label: root.hint;
+        accepted => { root.accepted(); }
+    }
+    public function focus-input() {
+        input.focus();
+    }
+}
+
+// Name and image of a playlist the user makes or changes.
+component PlaylistForm inherits HorizontalLayout {
+    in-out property <string> name;
+    in property <image> cover;
+    in property <bool> has-cover;
+    in property <string> action;
+    in property <bool> cancellable: false;
+    callback pick-cover();
+    callback clear-cover();
+    callback submit(string);
+    callback cancel();
+    spacing: 16px;
+    Rectangle {
+        width: 76px;
+        height: 76px;
+        border-radius: Theme.radius-medium;
+        clip: true;
+        background: Theme.text.with-alpha(0.06);
+        if root.has-cover: Image { width: parent.width; height: parent.height; source: root.cover; image-fit: ImageFit.cover; }
+        if !root.has-cover: Image {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 26px;
+            height: 26px;
+            source: @image-url("icons/mosaic.svg");
+            colorize: Theme.text-muted;
+        }
+    }
+    VerticalLayout {
+        horizontal-stretch: 1;
+        spacing: 10px;
+        HorizontalLayout {
+            spacing: 12px;
+            name-input := FieldInput {
+                horizontal-stretch: 1;
+                hint: L.t("Nome della playlist", "Playlist name");
+                text <=> root.name;
+                accepted => { root.submit(root.name); }
+            }
+            Button { label: root.action; enabled: root.name != ""; clicked => { root.submit(root.name); } }
+            if root.cancellable: Button { ghost: true; label: L.t("Annulla", "Cancel"); clicked => { root.cancel(); } }
+        }
+        HorizontalLayout {
+            spacing: 12px;
+            alignment: start;
+            Button { ghost: true; height: 30px; label: root.has-cover ? L.t("Cambia immagine", "Change image") : L.t("Scegli immagine", "Choose image"); clicked => { root.pick-cover(); } }
+            if root.has-cover: Button { ghost: true; height: 30px; label: L.t("Usa le copertine dei brani", "Use the song covers"); clicked => { root.clear-cover(); } }
+            if !root.has-cover: Text {
+                text: L.t("Senza immagine, Lume usa le copertine dei primi 4 brani.", "Without an image, Lume uses the covers of the first 4 songs.");
+                color: Theme.text-muted;
+                vertical-alignment: center;
+                wrap: word-wrap;
+            }
+        }
+    }
+    init => { name-input.focus-input(); }
+}
+
 component TrackRow inherits Rectangle {
     in property <Item> item;
     in property <int> index;
@@ -929,9 +1244,24 @@ component TrackRow inherits Rectangle {
     callback play();
     callback like();
     callback enqueue();
+    // The song menu, asked for at this point of the window.
+    callback open-menu(length, length);
+    // 1 add or remove this song from the selection (Ctrl), 2 select up to it (Shift).
+    callback select(int);
+    // The row moved on screen: the list scrolled, so an open menu would point elsewhere.
+    callback moved();
+    property <bool> with-ctrl;
+    property <bool> with-shift;
+    property <length> on-screen-y: self.absolute-position.y;
+    changed on-screen-y => { root.moved(); }
+
+    function menu-at(x: length, y: length) {
+        root.open-menu(self.absolute-position.x + x, self.absolute-position.y + y);
+    }
+
     height: 56px;
     border-radius: Theme.radius-small;
-    background: root.current ? Theme.primary.with-alpha(0.1) : (row.has-hover ? Theme.text.with-alpha(0.08) : transparent);
+    background: root.item.selected ? Theme.primary.with-alpha(0.18) : root.current ? Theme.primary.with-alpha(0.1) : (row.has-hover ? Theme.text.with-alpha(0.08) : transparent);
     accessible-role: button;
     accessible-label: root.item.title + ", " + root.item.subtitle;
     accessible-action-default => { root.play(); }
@@ -943,13 +1273,32 @@ component TrackRow inherits Rectangle {
                 root.play();
                 return accept;
             }
+            if (e.text == Key.Menu && !root.compact) {
+                root.menu-at(root.width - 244px, root.height);
+                return accept;
+            }
             return reject;
         }
     }
 
     row := TouchArea {
         mouse-cursor: pointer;
-        clicked => { root.play(); }
+        clicked => {
+            if (root.compact || !(root.with-ctrl || root.with-shift)) {
+                root.play();
+            } else {
+                root.select(root.with-shift ? 2 : 1);
+            }
+        }
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                root.with-ctrl = e.modifiers.control;
+                root.with-shift = e.modifiers.shift;
+            }
+            if (!root.compact && e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                root.menu-at(self.mouse-x, self.mouse-y);
+            }
+        }
     }
 
     HorizontalLayout {
@@ -984,6 +1333,39 @@ component TrackRow inherits Rectangle {
             vertical-alignment: center;
             overflow: elide;
         }
+        // Download state, in a slot of its own so the columns never move: a turning ring while
+        // yt-dlp gets ready, then the ring filling with the percentage, then the arrow.
+        if !root.compact: HorizontalLayout {
+            width: 54px;
+            spacing: 6px;
+            alignment: end;
+            if root.item.download-state == 2 && root.item.download-progress > 0.005: Text {
+                text: Math.round(root.item.download-progress * 100) + "%";
+                color: Theme.text-muted;
+                font-size: Theme.font-size * 0.86;
+                vertical-alignment: center;
+            }
+            if root.item.download-state > 0: VerticalLayout {
+                alignment: center;
+                ProgressRing {
+                    progress: root.item.download-progress;
+                    active: root.item.download-state == 2;
+                    accessible-role: progress-indicator;
+                    accessible-label: root.item.download-state == 2 ? L.t("Download in corso", "Downloading") : L.t("In coda per il download", "Waiting to download");
+                }
+            }
+            if root.item.offline && root.item.download-state == 0: VerticalLayout {
+                alignment: center;
+                Image {
+                    source: @image-url("icons/download.svg");
+                    width: 14px;
+                    height: 14px;
+                    colorize: Theme.primary;
+                    accessible-role: image;
+                    accessible-label: L.t("Scaricato", "Downloaded");
+                }
+            }
+        }
         Text { text: root.item.duration; color: Theme.text-muted; width: 40px; vertical-alignment: center; horizontal-alignment: right; }
         VerticalLayout {
             alignment: center;
@@ -999,6 +1381,10 @@ component TrackRow inherits Rectangle {
         if !root.compact: VerticalLayout {
             alignment: center;
             IconButton { icon: @image-url("icons/queue-add.svg"); icon-size: 18px; label: L.t("Aggiungi alla coda", "Add to queue"); clicked => { root.enqueue(); } }
+        }
+        if !root.compact: VerticalLayout {
+            alignment: center;
+            more := IconButton { icon: @image-url("icons/more.svg"); icon-size: 18px; label: L.t("Altro", "More"); clicked => { root.menu-at(root.width - 244px, root.height - 8px); } }
         }
     }
 
@@ -1205,7 +1591,26 @@ export component MainWindow inherits Window {
     // A tooltip must not outlive the view that showed it.
     changed immersive => { Tip.text = ""; }
     changed page => { Tip.text = ""; }
-    property <bool> confirm-remove: false;
+    // Song menus: where songs can go, and what downloading allows.
+    in property <[string]> own-playlists;
+    in property <bool> offline-enabled: false;
+    in property <string> offline-usage;
+    in property <bool> keep-in-tray: false;
+    // The form for a new playlist or for changing one.
+    in-out property <bool> create-open: false;
+    in-out property <string> form-name;
+    in property <image> form-cover;
+    in property <bool> form-has-cover;
+    // The open playlist: songs can be removed and it can be edited; what it can download.
+    in-out property <bool> detail-editing: false;
+    in property <bool> detail-downloadable;
+    in property <int> detail-download-state; // 0 not kept, 1 downloading, 2 kept offline
+    in property <string> detail-download-text;
+    in property <float> detail-download-progress;
+    // Songs selected in the list that is shown, for the song menu.
+    in property <int> selection-count;
+    in property <bool> detail-copyable;
+    in property <string> detail-copy-text;
 
     // ---- user actions ----
     callback login();
@@ -1270,6 +1675,96 @@ export component MainWindow inherits Window {
     callback home-acted();
     callback import-playlist(int, string);
     callback remove-local-playlist();
+    callback track-menu(int, int, int, int); // source, index, action, argument (see TrackMenu)
+
+    // ---- the song menu: one for the whole window, at the point it was asked for ----
+    property <int> menu-source;
+    property <int> menu-index;
+    property <Item> menu-item;
+    property <bool> menu-in-playlist;
+    property <bool> menu-playlist-downloads;
+    property <length> menu-x;
+    property <length> menu-y;
+    property <bool> menu-choosing;
+    // The playlists open on the left when there is no room on the right, level with
+    // "Add to playlist", the second line of the menu.
+    property <bool> chooser-left: root.menu-x + 2 * 244px + 4px > root.width;
+    property <length> chooser-y: root.menu-item.selected && root.selection-count > 1 ? 70px : 36px;
+    // Room for the list of playlists, which scrolls past ten of them.
+    property <length> chooser-height: 6px * 2 + 34px + (root.own-playlists.length > 0 ? 9px + 2px : 0px) + Math.min(root.own-playlists.length * 36px, 280px) + 4px;
+
+    function show-track-menu(source: int, index: int, item: Item, in-playlist: bool, playlist-downloads: bool, x: length, y: length) {
+        root.menu-source = source;
+        root.menu-index = index;
+        root.menu-item = item;
+        root.menu-in-playlist = in-playlist;
+        root.menu-playlist-downloads = playlist-downloads;
+        root.menu-choosing = false;
+        root.menu-x = Math.max(8px, Math.min(x, root.width - 252px));
+        root.menu-y = y;
+        track-popup.show();
+    }
+
+    track-popup := PopupWindow {
+        x: root.menu-x - (root.menu-choosing && root.chooser-left ? 248px : 0px);
+        // Near the bottom it opens upwards, staying inside the window.
+        y: root.menu-y + track-menu.preferred-height + 8px > root.height ? root.menu-y - track-menu.preferred-height : root.menu-y;
+        width: root.menu-choosing ? 2 * 244px + 4px : 244px;
+        height: root.menu-choosing ? Math.max(track-menu.preferred-height, root.chooser-y + chooser-height) : track-menu.preferred-height;
+        close-policy: PopupClosePolicy.close-on-click-outside;
+        MenuSurface {
+            x: root.menu-choosing && root.chooser-left ? 248px : 0px;
+            y: 0px;
+            width: 244px;
+            height: track-menu.preferred-height;
+            track-menu := TrackMenu {
+                playlists: root.own-playlists;
+                in-playlist: root.menu-in-playlist;
+                can-download: root.offline-enabled && (root.menu-item.youtube || root.menu-playlist-downloads);
+                downloaded: root.menu-item.offline;
+                count: root.menu-item.selected ? root.selection-count : 1;
+                choose(open) => { root.menu-choosing = open; }
+                act(action, arg) => {
+                    track-popup.close();
+                    root.track-menu(root.menu-source, root.menu-index, action, arg);
+                }
+            }
+        }
+        if root.menu-choosing: MenuSurface {
+            x: root.chooser-left ? 0px : 248px;
+            y: root.chooser-y;
+            width: 244px;
+            height: chooser.preferred-height;
+            chooser := PlaylistChooser {
+                playlists: root.own-playlists;
+                act(action, arg) => {
+                    track-popup.close();
+                    root.track-menu(root.menu-source, root.menu-index, action, arg);
+                }
+            }
+        }
+    }
+    callback select-track(int, int, int);    // source, index, 1 toggle or 2 up to it
+    callback clear-selection();
+    callback create-playlist(string);
+    callback pick-playlist-cover();
+    callback clear-playlist-cover();
+    callback edit-playlist();
+    callback save-playlist(string);
+    callback download-detail();
+    callback copy-detail();
+    callback offline-changed(bool);
+    callback keep-in-tray-changed(bool);
+    callback delete-downloads();
+
+    public function open-create(open: bool) {
+        root.import-open = false;
+        if (open) {
+            root.form-name = "";
+            root.clear-playlist-cover();
+        }
+        root.create-open = open;
+    }
 
     in-out property <bool> library-open: true;
     in-out property <bool> sidebar-open: true;
@@ -1355,6 +1850,12 @@ export component MainWindow inherits Window {
         root.shown = false;
     }
 
+    // The window went to the notification area instead of closing: the closing animation
+    // ends here, or its timer would close the window again as soon as it comes back.
+    public function stay-open() {
+        root.closing = false;
+    }
+
     title: "Lume";
     icon: @image-url("lume.png");
     no-frame: true;
@@ -1383,6 +1884,10 @@ export component MainWindow inherits Window {
     keys := FocusScope {
         key-pressed(e) => {
             if (e.text == Key.Escape) {
+                if (root.selection-count > 0) {
+                    root.clear-selection();
+                    return accept;
+                }
                 if (root.immersive) {
                     root.toggle-immersive();
                     return accept;
@@ -1848,6 +2353,9 @@ export component MainWindow inherits Window {
                                         play => { root.play-track(1, i); }
                                         like => { root.like-item(1, i); }
                                         enqueue => { root.enqueue-item(1, i); }
+                                        open-menu(x, y) => { root.show-track-menu(1, i, item, false, false, x, y); }
+                                        select(mode) => { root.select-track(1, i, mode); }
+                                        moved => { track-popup.close(); }
                                     }
                                 }
                                 if root.search-state.kind == 0 && root.results-albums.length > 0: SubTitle { text: "Album"; }
@@ -1886,16 +2394,49 @@ export component MainWindow inherits Window {
                             mouse-drag-pan-enabled: false;
                             horizontal-scrollbar-policy: always-off;
                             content-width: self.visible-width;
-                            property <length> top: root.import-open ? 52px + 176px : 52px;
+                            property <length> top: root.import-open || root.create-open ? 52px + 176px : 52px;
                             content-height: self.top + 4px + Math.ceil(root.playlists.length / self.columns) * 190px + 16px;
                             SectionTitle { x: root.page-x; y: 0px; text: L.t("Playlist", "Playlists"); }
-                            Button {
+                            import-toggle := Button {
                                 width: self.min-width;
                                 x: parent.visible-width - root.page-x - self.width;
                                 y: 2px;
-                                ghost: root.import-open;
+                                ghost: true;
                                 label: root.import-open ? L.t("Chiudi", "Close") : L.t("Importa playlist", "Import playlist");
-                                clicked => { root.import-open = !root.import-open; }
+                                clicked => {
+                                    root.create-open = false;
+                                    root.import-open = !root.import-open;
+                                }
+                            }
+                            Button {
+                                width: self.min-width;
+                                x: import-toggle.x - 10px - self.width;
+                                y: 2px;
+                                ghost: root.create-open;
+                                label: root.create-open ? L.t("Chiudi", "Close") : L.t("Nuova playlist", "New playlist");
+                                clicked => { root.open-create(!root.create-open); }
+                            }
+                            if root.create-open: Rectangle {
+                                x: root.page-x;
+                                y: 52px;
+                                width: parent.visible-width - root.page-x * 2;
+                                height: 160px;
+                                background: Theme.surface;
+                                border-radius: Theme.radius-large;
+                                border-width: 1px;
+                                border-color: Theme.border;
+                                PlaylistForm {
+                                    x: 20px;
+                                    y: (parent.height - self.preferred-height) / 2;
+                                    width: parent.width - 40px;
+                                    name <=> root.form-name;
+                                    cover: root.form-cover;
+                                    has-cover: root.form-has-cover;
+                                    action: L.t("Crea", "Create");
+                                    pick-cover => { root.pick-playlist-cover(); }
+                                    clear-cover => { root.clear-playlist-cover(); }
+                                    submit(name) => { root.create-playlist(name); }
+                                }
                             }
                             if root.import-open: Rectangle {
                                 x: root.page-x;
@@ -1996,6 +2537,9 @@ export component MainWindow inherits Window {
                                     play => { root.play-track(3, i); }
                                     like => { root.like-item(3, i); }
                                     enqueue => { root.enqueue-item(3, i); }
+                                    open-menu(x, y) => { root.show-track-menu(3, i, item, false, false, x, y); }
+                                    select(mode) => { root.select-track(3, i, mode); }
+                                    moved => { track-popup.close(); }
                                 }
                             }
                         }
@@ -2048,6 +2592,16 @@ export component MainWindow inherits Window {
                                                 Motion.on = !Motion.on;
                                                 root.animations-changed(Motion.on);
                                             }
+                                        }
+                                        SettingSwitch {
+                                            label: L.t("Continua quando chiudi", "Keep playing when closed");
+                                            on: root.keep-in-tray;
+                                            toggled => { root.keep-in-tray-changed(!root.keep-in-tray); }
+                                        }
+                                        Text {
+                                            text: L.t("Chiudendo la finestra la musica continua e Lume resta nell'area di notifica, accanto all'orologio.", "Closing the window keeps the music going, with Lume in the notification area by the clock.");
+                                            color: Theme.text-muted;
+                                            wrap: word-wrap;
                                         }
                                         Disclosure { label: L.t("Scorciatoie da tastiera", "Keyboard shortcuts"); text-size: Theme.font-size; open <=> root.shortcuts-open; }
                                         if root.shortcuts-open: VerticalLayout {
@@ -2274,6 +2828,38 @@ export component MainWindow inherits Window {
                                                 Button { ghost: true; label: L.t("Importa tema", "Import theme"); clicked => { root.import-theme(); } }
                                                 Button { ghost: true; label: L.t("Apri cartella temi", "Open themes folder"); clicked => { root.open-themes-folder(); } }
                                             }
+                                        }
+                                    }
+                                }
+
+                                // --- offline listening: off until the user turns it on, knowing the terms ---
+                                Rectangle {
+                                    background: Theme.surface;
+                                    border-radius: Theme.radius-large;
+                                    border-width: 1px;
+                                    border-color: Theme.border;
+                                    height: offline-card.preferred-height;
+                                    offline-card := VerticalLayout {
+                                        padding: 20px;
+                                        spacing: 12px;
+                                        SubTitle { text: L.t("Ascolto offline", "Offline listening"); }
+                                        SettingSwitch {
+                                            label: L.t("Download da YouTube", "Downloads from YouTube");
+                                            on: root.offline-enabled;
+                                            toggled => { root.offline-changed(!root.offline-enabled); }
+                                        }
+                                        Text {
+                                            text: L.t(
+                                                "Scarica i brani da YouTube per ascoltarli senza connessione, solo dentro Lume. Da Spotify non si scarica nulla: i brani delle tue playlist vengono cercati su YouTube. Le condizioni d'uso di YouTube non lo consentono: se lo attivi, lo fai sotto la tua responsabilità.",
+                                                "Downloads songs from YouTube to play without a connection, inside Lume only. Nothing is downloaded from Spotify: the songs of your playlists are looked up on YouTube. YouTube's terms of service don't allow it: turning it on is your own responsibility.");
+                                            color: Theme.text-muted;
+                                            wrap: word-wrap;
+                                        }
+                                        if root.offline-usage != "": HorizontalLayout {
+                                            spacing: 14px;
+                                            alignment: start;
+                                            Text { text: root.offline-usage; color: Theme.text; width: 180px; vertical-alignment: center; }
+                                            Button { ghost: true; danger: true; label: L.t("Elimina i download", "Delete downloads"); clicked => { root.delete-downloads(); } }
                                         }
                                     }
                                 }
@@ -2521,27 +3107,23 @@ export component MainWindow inherits Window {
                                             enabled: root.detail-tracks.length > 0;
                                             clicked => { root.enqueue-detail(); }
                                         }
-                                        Rectangle { horizontal-stretch: 1; }
-                                        // Away from the other actions, and quiet until it is about to act: then it turns red and asks.
-                                        if root.detail-local: Button {
+                                        // Downloading, only for YouTube songs and only once turned on in Settings.
+                                        if root.offline-enabled && root.detail-downloadable: DownloadButton {
+                                            horizontal-stretch: 0;
+                                            state: root.detail-download-state;
+                                            progress: root.detail-download-progress;
+                                            text: root.detail-download-text;
+                                            clicked => { root.download-detail(); }
+                                        }
+                                        // A Spotify list becomes the user's own, with the same songs from YouTube.
+                                        if root.detail-copyable: Button {
                                             horizontal-stretch: 0;
                                             ghost: true;
-                                            danger: root.confirm-remove;
-                                            label: root.confirm-remove ? L.t("Conferma rimozione", "Confirm removal") : L.t("Rimuovi playlist", "Remove playlist");
-                                            clicked => {
-                                                if (root.confirm-remove) {
-                                                    root.confirm-remove = false;
-                                                    root.remove-local-playlist();
-                                                } else {
-                                                    root.confirm-remove = true;
-                                                }
-                                            }
+                                            enabled: root.detail-copy-text == "";
+                                            label: root.detail-copy-text != "" ? root.detail-copy-text : L.t("Crea copia locale", "Make a local copy");
+                                            clicked => { root.copy-detail(); }
                                         }
-                                        Timer {
-                                            interval: 4s;
-                                            running: root.confirm-remove;
-                                            triggered => { root.confirm-remove = false; }
-                                        }
+                                        Rectangle { horizontal-stretch: 1; }
                                         if root.detail-source != "": VerticalLayout {
                                             alignment: center;
                                             Rectangle {
@@ -2552,8 +3134,55 @@ export component MainWindow inherits Window {
                                                 source-text := Text { text: root.detail-source; color: Theme.text-muted; }
                                             }
                                         }
+                                        // Changing or removing the playlist: rarer, so out of the way.
+                                        if root.detail-local: VerticalLayout {
+                                            alignment: center;
+                                            playlist-more := IconButton {
+                                                icon: @image-url("icons/more.svg");
+                                                label: L.t("Altre azioni", "More actions");
+                                                clicked => { playlist-menu.show(); }
+                                            }
+                                            playlist-menu := PopupWindow {
+                                                x: playlist-more.width - 220px;
+                                                y: playlist-more.height + 4px;
+                                                width: 220px;
+                                                height: playlist-actions.preferred-height;
+                                                MenuSurface {
+                                                    y: 0px;
+                                                    height: playlist-actions.preferred-height;
+                                                    playlist-actions := VerticalLayout {
+                                                        padding: 6px;
+                                                        spacing: 2px;
+                                                        MenuEntry { label: L.t("Modifica", "Edit"); clicked => { root.edit-playlist(); } }
+                                                        MenuEntry { danger: true; label: L.t("Rimuovi playlist", "Remove playlist"); clicked => { root.remove-local-playlist(); } }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                     if root.detail-note != "": Text { text: root.detail-note; color: Theme.text-muted; wrap: word-wrap; }
+                                }
+                            }
+                            if root.detail-editing: Rectangle {
+                                vertical-stretch: 0;
+                                height: edit-form.preferred-height + 40px;
+                                background: Theme.surface;
+                                border-radius: Theme.radius-large;
+                                border-width: 1px;
+                                border-color: Theme.border;
+                                edit-form := PlaylistForm {
+                                    x: 20px;
+                                    y: 20px;
+                                    width: parent.width - 40px;
+                                    name <=> root.form-name;
+                                    cover: root.form-cover;
+                                    has-cover: root.form-has-cover;
+                                    action: L.t("Salva", "Save");
+                                    cancellable: true;
+                                    pick-cover => { root.pick-playlist-cover(); }
+                                    clear-cover => { root.clear-playlist-cover(); }
+                                    submit(name) => { root.save-playlist(name); }
+                                    cancel => { root.detail-editing = false; }
                                 }
                             }
                             if root.detail-state.kind == 1: VerticalLayout { alignment: start; vertical-stretch: 1; for i in 7: SkeletonRow { } }
@@ -2572,6 +3201,9 @@ export component MainWindow inherits Window {
                                     play => { root.play-track(2, i); }
                                     like => { root.like-item(2, i); }
                                     enqueue => { root.enqueue-item(2, i); }
+                                    open-menu(x, y) => { root.show-track-menu(2, i, item, root.detail-local, root.detail-downloadable, x, y); }
+                                    select(mode) => { root.select-track(2, i, mode); }
+                                    moved => { track-popup.close(); }
                                 }
                             }
                         }

@@ -26,11 +26,15 @@ pub struct AppConfig {
     pub ytdlp_path: String,
     /// The first-run choice between Spotify and YouTube was made.
     pub onboarded: bool,
+    /// YouTube songs may be downloaded for listening offline. Off unless the user turns it on.
+    pub offline: bool,
+    /// Closing the window keeps the music going, with Lume in the notification area.
+    pub keep_in_tray: bool,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { client_id: String::new(), theme: "default-dark".into(), port: DEFAULT_PORT, recent_searches: Vec::new(), language: "it".into(), animations: true, engine: "spotify".into(), ytdlp_path: String::new(), onboarded: false }
+        Self { client_id: String::new(), theme: "default-dark".into(), port: DEFAULT_PORT, recent_searches: Vec::new(), language: "it".into(), animations: true, engine: "spotify".into(), ytdlp_path: String::new(), onboarded: false, offline: false, keep_in_tray: false }
     }
 }
 
@@ -119,6 +123,11 @@ pub fn tools_dir() -> PathBuf {
 }
 
 /// Playlists imported by the user and songs liked without Spotify: kept on logout.
+/// Songs downloaded for listening offline, one file per YouTube video.
+pub fn offline_dir() -> PathBuf {
+    dirs().data_local_dir().join("offline")
+}
+
 pub fn library_dir() -> PathBuf {
     dirs().data_local_dir().join("library")
 }

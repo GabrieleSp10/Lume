@@ -8,6 +8,7 @@ mod memory;
 mod models;
 mod nav;
 mod theme_editor;
+mod tray;
 
 use std::{
     rc::Rc,
@@ -67,6 +68,10 @@ fn select_renderer() {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    // Starting Lume again shows the copy already running, maybe hidden in the tray.
+    if tray::already_running() {
+        return Ok(());
+    }
     select_renderer();
     app_core::config::move_old_folders();
     let config = AppConfig::load_or_create().unwrap_or_default();
@@ -93,6 +98,7 @@ fn main() -> Result<(), slint::PlatformError> {
     wire_playback_settings(&ui, &config);
     ui.set_client_id(config.client_id.trim().into());
     ui.set_redirect_uri(config.redirect_uri().into());
+    ui.set_keep_in_tray(config.keep_in_tray);
     wire_onboarding(&ui);
     // Someone who set up Spotify before the first-run choice existed already chose.
     ui.set_onboarding(!config.onboarded && config.client_id.trim().is_empty());
@@ -103,6 +109,7 @@ fn main() -> Result<(), slint::PlatformError> {
     apply_backdrop_when_ready(&ui, editor.material());
     memory::start_autosave(&ui);
     let result = ui.run();
+    tray::remove_icon();
     memory::save(&ui);
     result
 }
@@ -389,6 +396,9 @@ fn start_backend(ui: &MainWindow, config: &AppConfig) {
     let lib = Rc::new(Library::new(api, engine, ui.as_weak()));
     library::wire(ui, &lib);
     library::install(Rc::clone(&lib));
+    ui.set_offline_enabled(config.offline);
+    ui.set_offline_usage(library::downloads::usage_text().into());
+    library::downloads::resume_all(&lib);
 
     let state: SharedState = Arc::default();
     spawn_event_pump(events, ui.as_weak(), Arc::clone(&backend), Arc::clone(&state));
@@ -442,6 +452,25 @@ thread_local! {
 }
 
 /// Shows a short message above the player bar for a few seconds.
+/// Closing ends Lume, or with "keep playing" on, leaves it playing in the notification area.
+fn close_window(ui: &MainWindow) {
+    if ui.get_keep_in_tray() {
+        memory::save(ui);
+        // The pointer leaves the window, so the close button is not still held when it comes
+        // back (it would close it again); and it hides once this click is fully handled.
+        ui.window().dispatch_event(slint::platform::WindowEvent::PointerExited);
+        ui.invoke_stay_open();
+        let weak = ui.as_weak();
+        slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+            if let Some(ui) = weak.upgrade() {
+                tray::hide_to_tray(&ui);
+            }
+        });
+    } else {
+        let _ = slint::quit_event_loop();
+    }
+}
+
 fn toast(ui: &MainWindow, message: &str) {
     show_toast(ui, message, "", 4500);
 }
@@ -503,8 +532,39 @@ fn try_backdrop(weak: slint::Weak<MainWindow>, material: Material, attempt: u32)
 }
 
 fn wire_window_callbacks(ui: &MainWindow) {
-    ui.on_close_app(|| {
-        let _ = slint::quit_event_loop();
+    let weak = ui.as_weak();
+    ui.on_close_app(move || {
+        if let Some(ui) = weak.upgrade() {
+            close_window(&ui);
+        }
+    });
+    let weak = ui.as_weak();
+    ui.window().on_close_requested(move || {
+        if let Some(ui) = weak.upgrade() {
+            close_window(&ui);
+        }
+        slint::CloseRequestResponse::KeepWindowShown
+    });
+    let weak = ui.as_weak();
+    ui.on_keep_in_tray_changed(move |on| {
+        if let Ok(mut config) = AppConfig::load_or_create() {
+            config.keep_in_tray = on;
+            let _ = config.save();
+        }
+        if let Some(ui) = weak.upgrade() {
+            ui.set_keep_in_tray(on);
+        }
+    });
+    let weak = ui.as_weak();
+    tray::install(move |action| {
+        let Some(ui) = weak.upgrade() else { return };
+        match action {
+            tray::Action::Show => tray::show_window(&ui),
+            tray::Action::PlayPause => library::with(|lib| lib.play_pause()),
+            tray::Action::Quit => {
+                let _ = slint::quit_event_loop();
+            }
+        }
     });
 
     let weak = ui.as_weak();
