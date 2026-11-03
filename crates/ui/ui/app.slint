@@ -440,12 +440,15 @@ component ColorWheel inherits Rectangle {
 component SettingSwitch inherits HorizontalLayout {
     in property <string> label;
     in property <bool> on;
+    in property <bool> enabled: true;
     in property <length> label-width: 180px;
     callback toggled();
     spacing: 14px;
     alignment: start;
-    Text { text: root.label; color: Theme.text; width: root.label-width; vertical-alignment: center; wrap: word-wrap; }
+    Text { text: root.label; color: Theme.text; width: root.label-width; vertical-alignment: center; wrap: word-wrap; opacity: root.enabled ? 1 : 0.5; }
     Rectangle {
+        opacity: root.enabled ? 1 : 0.4;
+        accessible-enabled: root.enabled;
         width: 46px;
         height: 26px;
         border-radius: 13px;
@@ -464,7 +467,8 @@ component SettingSwitch inherits HorizontalLayout {
             animate x { duration: Motion.base; easing: cubic-bezier(0.22, 1, 0.36, 1); }
         }
         TouchArea {
-            mouse-cursor: pointer;
+            enabled: root.enabled;
+            mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
             clicked => { root.toggled(); }
         }
     }
@@ -1594,6 +1598,8 @@ export component MainWindow inherits Window {
     // Song menus: where songs can go, and what downloading allows.
     in property <[string]> own-playlists;
     in property <bool> offline-enabled: false;
+    in property <bool> download-saver: false;
+    in property <bool> fast-downloads: false;
     in property <string> offline-usage;
     in property <bool> keep-in-tray: false;
     // The form for a new playlist or for changing one.
@@ -1754,6 +1760,8 @@ export component MainWindow inherits Window {
     callback download-detail();
     callback copy-detail();
     callback offline-changed(bool);
+    callback quality-changed(bool);        // true: space saver
+    callback fast-downloads-changed(bool);
     callback keep-in-tray-changed(bool);
     callback delete-downloads();
 
@@ -2850,10 +2858,36 @@ export component MainWindow inherits Window {
                                         }
                                         Text {
                                             text: L.t(
-                                                "Scarica i brani da YouTube per ascoltarli senza connessione, solo dentro Lume. Da Spotify non si scarica nulla: i brani delle tue playlist vengono cercati su YouTube. Le condizioni d'uso di YouTube non lo consentono: se lo attivi, lo fai sotto la tua responsabilità.",
-                                                "Downloads songs from YouTube to play without a connection, inside Lume only. Nothing is downloaded from Spotify: the songs of your playlists are looked up on YouTube. YouTube's terms of service don't allow it: turning it on is your own responsibility.");
+                                                "I brani si scaricano solo da YouTube e restano dentro Lume. Le condizioni d'uso di YouTube non lo consentono: lo attivi sotto la tua responsabilità.",
+                                                "Songs come from YouTube only and stay inside Lume. YouTube's terms of service don't allow it: turning it on is your own responsibility.");
                                             color: Theme.text-muted;
                                             wrap: word-wrap;
+                                        }
+                                        if root.offline-enabled: HorizontalLayout {
+                                            spacing: 14px;
+                                            alignment: start;
+                                            Text { text: L.t("Qualità", "Quality"); color: Theme.text; width: 180px; vertical-alignment: center; }
+                                            SegmentedToggle {
+                                                options: [L.t("Alta", "High"), L.t("Risparmio", "Saver")];
+                                                segment-width: 110px;
+                                                selected: root.download-saver ? 1 : 0;
+                                                chosen(i) => {
+                                                    if ((i == 1) != root.download-saver) {
+                                                        root.quality-changed(i == 1);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        // Several songs at once only with an account, which YouTube allows more.
+                                        if root.offline-enabled: SettingSwitch {
+                                            label: L.t("Download veloce", "Fast downloads");
+                                            on: root.fast-downloads && root.youtube-connected;
+                                            enabled: root.youtube-connected;
+                                            toggled => { root.fast-downloads-changed(!root.fast-downloads); }
+                                        }
+                                        if root.offline-enabled && !root.youtube-connected: Text {
+                                            text: L.t("Serve un account YouTube collegato.", "Needs a linked YouTube account.");
+                                            color: Theme.text-muted;
                                         }
                                         if root.offline-usage != "": HorizontalLayout {
                                             spacing: 14px;

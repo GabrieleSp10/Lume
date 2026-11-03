@@ -6,7 +6,6 @@ use std::{
     collections::HashMap,
     os::windows::process::CommandExt,
     process::Command as Process,
-    path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::Sender,
@@ -42,23 +41,59 @@ const MIN_SCORE: f64 = -40.0;
 /// Words that mark a different recording, unless the Spotify title has them too.
 const OTHER_VERSION: [&str; 13] = ["live", "cover", "remix", "karaoke", "instrumental", "sped up", "slowed", "nightcore", "reverb", "8d", "acoustic", "reaction", "tutorial"];
 
-/// A download stops at its next progress line once this is set.
-static CANCEL: AtomicBool = AtomicBool::new(false);
-/// yt-dlp prints one line like this per step: bytes fetched, then the size or its estimate.
-const PROGRESS_TEMPLATE: &str = "download:LUME %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s";
+/// yt-dlp prints one line like this per step: the video, bytes fetched, then the size or
+/// its estimate; and one "LUMEDONE <video>" when a file is complete.
+const PROGRESS_TEMPLATE: &str = "download:LUME %(info.id)s %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s";
+const DONE_TEMPLATE: &str = "after_move:LUMEDONE %(id)s";
+/// Between two songs of one run, at random in this range, as a listener would.
+const SLEEP_SECONDS: (&str, &str) = ("2", "5");
 
-/// Stops the download that is running, if any.
-pub fn cancel_download() {
-    CANCEL.store(true, Ordering::SeqCst);
+/// How downloaded songs are kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quality {
+    /// The best audio YouTube has (Opus, about 130–160 kbps).
+    High,
+    /// About half the size (Opus, about 70 kbps).
+    Saver,
 }
 
-/// How much of the song a progress line says is done, from 0 to 1.
-fn progress_of(line: &str) -> Option<f32> {
-    let mut fields = line.strip_prefix("LUME ")?.split_whitespace().map(|f| f.parse::<f64>().ok());
-    let done = fields.next()??;
-    let (total, estimate) = (fields.next().flatten(), fields.next().flatten());
+impl Quality {
+    pub fn from_name(name: &str) -> Self {
+        if name == "saver" { Self::Saver } else { Self::High }
+    }
+
+    /// AAC stays as the fallback for videos without Opus.
+    fn format(self) -> &'static str {
+        match self {
+            Self::High => "bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio",
+            Self::Saver => "bestaudio[acodec=opus][abr<=90]/worstaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio",
+        }
+    }
+}
+
+/// What a download run tells while it goes.
+pub enum Fetch {
+    /// How much of this video is done, from 0 to 1.
+    Progress(String, f32),
+    /// This video's file is complete.
+    Done(String),
+}
+
+/// A video and how much of it a progress line says is done, from 0 to 1.
+fn progress_of(line: &str) -> Option<(String, f32)> {
+    let mut fields = line.strip_prefix("LUME ")?.split_whitespace();
+    let video = fields.next().filter(|id| is_video_id(id))?.to_string();
+    let mut numbers = fields.map(|f| f.parse::<f64>().ok());
+    let done = numbers.next()??;
+    let (total, estimate) = (numbers.next().flatten(), numbers.next().flatten());
     let total = total.or(estimate).filter(|t| *t > 0.0)?;
-    Some((done / total).clamp(0.0, 1.0) as f32)
+    Some((video, (done / total).clamp(0.0, 1.0) as f32))
+}
+
+/// Ends yt-dlp and what it started: the standalone yt-dlp runs as two processes, and
+/// stopping only the first would leave the download going.
+fn kill_tree(pid: u32) {
+    let _ = Process::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).creation_flags(CREATE_NO_WINDOW).output();
 }
 
 /// What the page is given instead of a link for a downloaded song.
@@ -224,34 +259,50 @@ impl Ytdlp {
         pick_video(entries, track).ok_or_else(|| format!("no youtube match for {}", track.name))
     }
 
-    /// Downloads the audio of `video` into the offline folder, as YouTube gives it (no
-    /// conversion), and returns the file. `progress` hears how much is done, from 0 to 1.
-    /// [`cancel_download`] stops it; what was fetched stays, and the next try goes on from there.
-    pub fn download_audio(&self, video: &str, progress: impl Fn(f32)) -> Result<PathBuf, String> {
-        if !is_video_id(video) {
-            return Err("not a video".into());
+    /// Downloads the audio of several videos in one run of yt-dlp, as YouTube gives it (no
+    /// conversion), into the offline folder. `on` hears progress and each finished file.
+    /// Setting `cancel` stops the run; what was fetched stays, and a later try goes on from
+    /// there. Songs that fail are left out; a bot check stops the run and pauses YouTube.
+    pub fn download(&self, videos: &[String], quality: Quality, cancel: &AtomicBool, on: impl Fn(Fetch)) -> Result<(), String> {
+        let videos: Vec<&String> = videos.iter().filter(|v| is_video_id(v) && offline::file_for(v).is_none()).collect();
+        if videos.is_empty() {
+            return Ok(());
         }
-        if let Some(path) = offline::file_for(video) {
-            return Ok(path);
-        }
-        let _one_at_a_time = ONE_AT_A_TIME.lock().unwrap();
         if blocked() {
             return Err(BLOCKED_MESSAGE.into());
         }
         let dir = offline_dir();
         std::fs::create_dir_all(&dir).map_err(|e| format!("offline: {e}"))?;
-        let template = dir.join(format!("{video}.%(ext)s"));
-        let url = format!("https://www.youtube.com/watch?v={video}");
-        CANCEL.store(false, Ordering::SeqCst);
-        let args = ["-f", "bestaudio[ext=m4a]/bestaudio", "--no-playlist", "--newline", "--progress-template", PROGRESS_TEMPLATE, "-o", &template.to_string_lossy(), "--", &url];
-        let result = self.run_with_progress(&args, progress);
+        let template = dir.join("%(id)s.%(ext)s").to_string_lossy().into_owned();
+        let urls: Vec<String> = videos.iter().map(|v| format!("https://www.youtube.com/watch?v={v}")).collect();
+        let mut args = vec![
+            "-f", quality.format(), "--no-playlist", "--ignore-errors", "--newline", "--progress",
+            "--progress-template", PROGRESS_TEMPLATE, "--print", DONE_TEMPLATE,
+            "--sleep-interval", SLEEP_SECONDS.0, "--max-sleep-interval", SLEEP_SECONDS.1,
+            "-o", &template, "--",
+        ];
+        args.extend(urls.iter().map(String::as_str));
+        let result = self.run_with_progress(&args, cancel, |line| {
+            if let Some(video) = line.strip_prefix("LUMEDONE ").map(str::trim).filter(|v| is_video_id(v)) {
+                on(Fetch::Done(video.to_string()));
+            } else if let Some((video, done)) = progress_of(line) {
+                on(Fetch::Progress(video, done));
+            }
+        });
+        // One song YouTube refuses does not stop the others; a bot check stops everything.
+        let result = match result {
+            Err(e) if !e.contains("not a bot") && e != "cancelled" => {
+                eprintln!("some songs not downloaded: {e}");
+                Ok(())
+            }
+            other => other,
+        };
         note_block(&result);
-        result?;
-        offline::file_for(video).ok_or_else(|| "yt-dlp: no file".to_string())
+        result
     }
 
-    /// Runs yt-dlp reading its progress lines as they come, so it can be stopped midway.
-    fn run_with_progress(&self, args: &[&str], progress: impl Fn(f32)) -> Result<(), String> {
+    /// Runs yt-dlp reading its output lines as they come, so it can be stopped midway.
+    fn run_with_progress(&self, args: &[&str], cancel: &AtomicBool, on_line: impl Fn(&str)) -> Result<(), String> {
         use std::io::{BufRead, BufReader, Read};
         let mut child = self
             .command(args)
@@ -266,18 +317,28 @@ impl Ytdlp {
             let _ = stderr.read_to_string(&mut text);
             text
         });
-        for line in BufReader::new(child.stdout.take().expect("piped stdout")).lines().map_while(Result::ok) {
-            if CANCEL.load(Ordering::SeqCst) {
-                let _ = child.kill();
-                break;
+        let stdout = child.stdout.take().expect("piped stdout");
+        let (pid, finished) = (child.id(), AtomicBool::new(false));
+        thread::scope(|scope| {
+            // yt-dlp can be silent for seconds (getting ready, or pausing between songs): a
+            // stop must not wait for its next line.
+            scope.spawn(|| {
+                while !finished.load(Ordering::SeqCst) {
+                    if cancel.load(Ordering::SeqCst) {
+                        kill_tree(pid);
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(150));
+                }
+            });
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                on_line(&line);
             }
-            if let Some(done) = progress_of(&line) {
-                progress(done);
-            }
-        }
+            finished.store(true, Ordering::SeqCst);
+        });
         let status = child.wait().map_err(|e| format!("yt-dlp: {e}"))?;
         let errors = errors.join().unwrap_or_default();
-        if CANCEL.swap(false, Ordering::SeqCst) {
+        if cancel.load(Ordering::SeqCst) {
             return Err("cancelled".into());
         }
         if status.success() { Ok(()) } else { Err(format!("yt-dlp: {}", errors.trim())) }
@@ -490,10 +551,19 @@ mod tests {
 
     #[test]
     fn reads_download_progress() {
-        assert_eq!(progress_of("LUME 500 1000 NA"), Some(0.5));
-        assert_eq!(progress_of("LUME 250 NA 1000.0"), Some(0.25));
-        assert_eq!(progress_of("LUME 10 NA NA"), None);
-        assert_eq!(progress_of("[download] Destination: x.m4a"), None);
+        let of = |line| progress_of(line).map(|(v, p)| (v, p));
+        assert_eq!(of("LUME fOT0BUpITw8 500 1000 NA"), Some(("fOT0BUpITw8".into(), 0.5)));
+        assert_eq!(of("LUME fOT0BUpITw8 250 NA 1000.0"), Some(("fOT0BUpITw8".into(), 0.25)));
+        assert_eq!(of("LUME fOT0BUpITw8 10 NA NA"), None);
+        assert_eq!(of("LUME --exec 1 2 3"), None);
+        assert_eq!(of("[download] Destination: x.m4a"), None);
+    }
+
+    #[test]
+    fn qualities_ask_for_opus_first() {
+        assert!(Quality::from_name("saver").format().contains("abr<=90"));
+        assert_eq!(Quality::from_name("anything"), Quality::High);
+        assert!(Quality::High.format().starts_with("bestaudio[acodec=opus]"));
     }
 
     #[test]

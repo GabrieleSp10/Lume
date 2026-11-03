@@ -384,9 +384,10 @@ impl Library {
             return;
         }
         let found = tracks.len();
+        let taken: Vec<String> = self.likes.local.playlists().into_iter().map(|p| p.name).collect();
         let playlist = ImportedPlaylist {
             id: format!("copy-{:016x}", rand_id()),
-            name: name.clone(),
+            name: copy_name(&name, &taken),
             source: SOURCE_COPY.into(),
             origin: name.clone(),
             total: found as u32,
@@ -405,6 +406,16 @@ impl Library {
         };
         crate::toast(ui, &text);
     }
+}
+
+/// "Mix (YouTube)", or "Mix (YouTube 2)" when that is taken: the library never shows the
+/// same name twice.
+fn copy_name(name: &str, taken: &[String]) -> String {
+    let base = format!("{name} (YouTube)");
+    if !taken.contains(&base) {
+        return base;
+    }
+    (2..).map(|n| format!("{name} (YouTube {n})")).find(|candidate| !taken.contains(candidate)).unwrap_or(base)
 }
 
 fn rand_id() -> u64 {
@@ -449,6 +460,12 @@ fn keep_image(path: &std::path::Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copies_never_share_a_name() {
+        assert_eq!(copy_name("Mix", &[]), "Mix (YouTube)");
+        assert_eq!(copy_name("Mix", &["Mix (YouTube)".into()]), "Mix (YouTube 2)");
+    }
 
     #[test]
     fn mosaic_files_change_with_their_covers() {

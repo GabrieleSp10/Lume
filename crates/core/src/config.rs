@@ -28,13 +28,17 @@ pub struct AppConfig {
     pub onboarded: bool,
     /// YouTube songs may be downloaded for listening offline. Off unless the user turns it on.
     pub offline: bool,
+    /// "high" (the best audio YouTube has) or "saver" (about half the size).
+    pub download_quality: String,
+    /// Three songs at a time instead of one; only with a YouTube account linked.
+    pub fast_downloads: bool,
     /// Closing the window keeps the music going, with Lume in the notification area.
     pub keep_in_tray: bool,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { client_id: String::new(), theme: "default-dark".into(), port: DEFAULT_PORT, recent_searches: Vec::new(), language: "it".into(), animations: true, engine: "spotify".into(), ytdlp_path: String::new(), onboarded: false, offline: false, keep_in_tray: false }
+        Self { client_id: String::new(), theme: "default-dark".into(), port: DEFAULT_PORT, recent_searches: Vec::new(), language: "it".into(), animations: true, engine: "spotify".into(), ytdlp_path: String::new(), onboarded: false, offline: false, download_quality: "high".into(), fast_downloads: false, keep_in_tray: false }
     }
 }
 

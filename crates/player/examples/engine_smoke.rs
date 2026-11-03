@@ -45,7 +45,13 @@ fn main() {
         Ok(video) => {
             if env::var("DOWNLOAD").is_ok() {
                 let at = Instant::now();
-                println!("download: {:?} in {:.1}s", Ytdlp::from_config(&config).download_audio(&video, |done| println!("  {:.0}%", done * 100.0)), at.elapsed().as_secs_f32());
+                let quality = app_player::Quality::from_name(&env::var("QUALITY").unwrap_or_default());
+                let cancel = std::sync::atomic::AtomicBool::new(false);
+                let result = Ytdlp::from_config(&config).download(std::slice::from_ref(&video), quality, &cancel, |event| match event {
+                    app_player::Fetch::Progress(_, done) => println!("  {:.0}%", done * 100.0),
+                    app_player::Fetch::Done(v) => println!("  done {v}"),
+                });
+                println!("download: {result:?} in {:.1}s", at.elapsed().as_secs_f32());
             }
             Track { uri: format!("youtube:{video}"), name: video, ..Default::default() }
         }

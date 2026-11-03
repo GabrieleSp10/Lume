@@ -1510,6 +1510,7 @@ impl Library {
         self.queue_toggled();
         self.reload_detail();
         self.refresh_home();
+        ui.set_offline_usage(downloads::usage_text().into());
     }
 
     /// Called when playback ends with nothing loaded.
@@ -1691,6 +1692,10 @@ pub fn wire(ui: &MainWindow, lib: &Rc<Library>) {
     ui.on_offline_changed(move |on| downloads::set_enabled(&l, on));
     let l = Rc::clone(lib);
     ui.on_delete_downloads(move || downloads::delete_all(&l));
+    let l = Rc::clone(lib);
+    ui.on_quality_changed(move |saver| downloads::set_quality(&l, saver));
+    let l = Rc::clone(lib);
+    ui.on_fast_downloads_changed(move |on| downloads::set_fast(&l, on));
 }
 
 #[cfg(test)]

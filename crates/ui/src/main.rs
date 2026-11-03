@@ -397,6 +397,8 @@ fn start_backend(ui: &MainWindow, config: &AppConfig) {
     library::wire(ui, &lib);
     library::install(Rc::clone(&lib));
     ui.set_offline_enabled(config.offline);
+    ui.set_download_saver(config.download_quality == "saver");
+    ui.set_fast_downloads(config.fast_downloads);
     ui.set_offline_usage(library::downloads::usage_text().into());
     library::downloads::resume_all(&lib);
 

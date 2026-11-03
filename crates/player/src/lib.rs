@@ -30,7 +30,7 @@ use serde_json::{json, Value};
 const DEVICE_WAIT: Duration = Duration::from_secs(6);
 
 pub use types::{Command, EngineKind, Event, PlayRequest, PlaybackState, Track};
-pub use youtube::{cancel_download, video_for, Ytdlp, YOUTUBE_URI};
+pub use youtube::{video_for, Fetch, Quality, Ytdlp, YOUTUBE_URI};
 
 /// Anything that can play audio and be controlled by the UI.
 pub trait PlaybackEngine: Send + Sync {

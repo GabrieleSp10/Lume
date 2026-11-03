@@ -41,7 +41,8 @@ L'accesso a YouTube resta salvato solo sul tuo computer; «Scollega» lo cancell
 È **disattivato** finché non lo attivi tu in **Impostazioni › Ascolto offline**. Poi puoi scaricare un brano dal suo menu **…** o un'intera playlist con **Scarica**.
 
 - Si scaricano **solo brani di YouTube**, mai da Spotify, e restano dentro Lume (`%LOCALAPPDATA%\Lume\data\offline`), che li riproduce anche senza connessione.
-- Lume scarica un brano alla volta, con una pausa tra l'uno e l'altro, e si ferma se YouTube chiede di confermare che non sei un bot.
+- **Qualità**: «Alta» (la migliore di YouTube, circa 4 MB a brano) o «Risparmio» (circa la metà).
+- Lume scarica un brano alla volta, con pause tra l'uno e l'altro; con un account YouTube collegato puoi attivare **Download veloce** (3 alla volta). Se YouTube chiede di confermare che non sei un bot, si ferma, riprende dopo un quarto d'ora e torna a un brano alla volta.
 - **Le condizioni d'uso di YouTube non consentono di scaricare i contenuti**, salvo dove lo offre YouTube stesso. Se attivi l'ascolto offline lo fai sotto la tua responsabilità, e solo per uso personale.
 
 ## In sottofondo
