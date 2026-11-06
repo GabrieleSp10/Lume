@@ -8,8 +8,8 @@ name = "lume"
 path = "src/main.rs"
 
 [dependencies]
-app_core = { version = "0.2.1", path = "../core" }
-app_player = { version = "0.2.1", path = "../player" }
+app_core = { version = "0.2.2", path = "../core" }
+app_player = { version = "0.2.2", path = "../player" }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 raw-window-handle = "0.6"
 rfd = "0.17.2"

@@ -9,7 +9,7 @@ default = ["librespot"]
 librespot = ["dep:librespot-core", "dep:librespot-playback", "dep:tokio"]
 
 [dependencies]
-app_core = { version = "0.2.1", path = "../core" }
+app_core = { version = "0.2.2", path = "../core" }
 rand = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

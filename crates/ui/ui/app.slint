@@ -1711,15 +1711,19 @@ export component MainWindow inherits Window {
         track-popup.show();
     }
 
+    // A popup keeps the size it opened with: it opens big enough for the menu and the list of
+    // playlists beside it, or clicks on that list would land outside and only close it.
     track-popup := PopupWindow {
-        x: root.menu-x - (root.menu-choosing && root.chooser-left ? 248px : 0px);
-        // Near the bottom it opens upwards, staying inside the window.
-        y: root.menu-y + track-menu.preferred-height + 8px > root.height ? root.menu-y - track-menu.preferred-height : root.menu-y;
-        width: root.menu-choosing ? 2 * 244px + 4px : 244px;
-        height: root.menu-choosing ? Math.max(track-menu.preferred-height, root.chooser-y + chooser-height) : track-menu.preferred-height;
+        x: root.menu-x - (root.chooser-left ? 248px : 0px);
+        // Near the bottom it moves up, staying inside the window.
+        y: Math.max(0px, Math.min(root.menu-y, root.height - self.height - 8px));
+        width: 2 * 244px + 4px;
+        height: Math.max(track-menu.preferred-height, root.chooser-y + root.chooser-height);
         close-policy: PopupClosePolicy.close-on-click-outside;
+        // The empty part beside the menu acts like the outside.
+        TouchArea { clicked => { track-popup.close(); } }
         MenuSurface {
-            x: root.menu-choosing && root.chooser-left ? 248px : 0px;
+            x: root.chooser-left ? 248px : 0px;
             y: 0px;
             width: 244px;
             height: track-menu.preferred-height;
@@ -1736,7 +1740,9 @@ export component MainWindow inherits Window {
                 }
             }
         }
-        if root.menu-choosing: MenuSurface {
+        // Made with the menu and only shown: a part added to an open popup gets no clicks.
+        MenuSurface {
+            visible: root.menu-choosing;
             x: root.chooser-left ? 0px : 248px;
             y: root.chooser-y;
             width: 244px;
